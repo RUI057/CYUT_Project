@@ -14,9 +14,9 @@ hands    = mp_hands.Hands(static_image_mode=False, max_num_hands=2,
                           min_detection_confidence=0.7)
 
 from src.font_utils import get_font, put_text
-font_large  = get_font(40)
-font_medium = get_font(28)
-font_small  = get_font(20)
+font_large  = get_font(50)
+font_medium = get_font(40)
+font_small  = get_font(40)
 
 # ── 設定 ──────────────────────────────────────
 GESTURES         = get_all_labels()
@@ -47,7 +47,7 @@ def extract_two_hands(results):
                 right = feat
     return left + right
 
-# ── 攝影機 ────────────────────────────────────
+# ── 攝影機 
 cap = cv2.VideoCapture(0)
 if not cap.isOpened():
     for i in range(1, 4):
@@ -55,20 +55,21 @@ if not cap.isOpened():
         if cap.isOpened():
             break
 
-# ── 狀態 ──────────────────────────────────────
+# ── 狀態 
 current_gesture = 0
 state           = "waiting"   # waiting → holding → recording → cooldown
 sequence        = []
 hold_count      = 0
 cooldown_count  = 0
+paused          = False
 
 print("[詞彙清單]")
 for i, g in enumerate(GESTURES):
     existing = len(os.listdir(os.path.join(DATA_DIR, g)))
     status   = "OK" if existing >= SAMPLES_PER_CLASS else f"{existing}/{SAMPLES_PER_CLASS}"
     print(f"  {i:2d} = {g:6s}  [{status}]")
-print("\n[操作] N=下一個  P=上一個  R=重置此詞彙  Q=離開")
-print("[提示] 偵測到手後自動倒數錄製，不需要按鍵\n")
+print("\n[操作] N=下一個  P=上一個  R=重置此詞彙  D=刪除上一個  S=暫停/繼續偵測  Q=離開")
+print("[提示] 按 S 可暫停偵測避免誤觸，按 D 可刪除上一筆已儲存資料\n")
 
 while cap.isOpened():
     ret, frame = cap.read()
@@ -89,8 +90,11 @@ while cap.isOpened():
         for hand_lms in results.multi_hand_landmarks:
             mp_draw.draw_landmarks(frame, hand_lms, mp_hands.HAND_CONNECTIONS)
 
-    # ── 狀態機（全自動）──────────────────────
-    if existing >= SAMPLES_PER_CLASS:
+    # ── 狀態機
+    if paused:
+        hold_count = 0
+
+    elif existing >= SAMPLES_PER_CLASS:
         state = "done"
 
     elif state == "waiting":
@@ -122,7 +126,7 @@ while cap.isOpened():
         if cooldown_count <= 0:
             state = "waiting" if existing < SAMPLES_PER_CLASS else "done"
 
-    # ── 畫面顯示 ──────────────────────────────
+    # ── 畫面顯示 
     # 詞彙索引與名稱
     idx_text = f"[{current_gesture + 1}/{len(GESTURES)}]"
     frame = put_text(frame, f"{idx_text} {label}", (10, 10), font_large,
@@ -138,9 +142,10 @@ while cap.isOpened():
         "recording": (f"錄製中  {len(sequence)}/{SEQUENCE_LENGTH} 幀",  (0, 220, 80)),
         "cooldown":  (f"冷卻中  {cooldown_count}",                      (0, 160, 255)),
         "done":      ("此詞彙已完成！按 N 換下一個",                     (0, 220, 80)),
+        "paused":    ("暫停偵測，按 S 繼續",                         (220, 180, 0)),
     }
-    s_text, s_color = state_info[state]
-    frame = put_text(frame, s_text, (10, 95), font_medium, s_color)
+    frame = put_text(frame, state_info["paused"][0] if paused else state_info[state][0],
+                     (10, 95), font_medium, state_info["paused"][1] if paused else state_info[state][1])
 
     # 有無偵測到手
     hand_text  = f"偵測到 {len(results.multi_hand_landmarks)} 隻手" if has_hand else "未偵測到手"
@@ -154,14 +159,14 @@ while cap.isOpened():
     cv2.rectangle(frame, (10, h - 25), (10 + filled, h - 8), (0, 180, 80), -1)
 
     # 操作提示
-    frame = put_text(frame, "N=下一個  P=上一個  R=重置  Q=離開",
+    frame = put_text(frame, "N=下一個  P=上一個  R=重置  D=刪除上一個  S=暫停/繼續  Q=離開",
                      (10, h - 45), font_small, (120, 120, 120))
 
     # 錄製中閃爍紅點
     if state == "recording":
         cv2.circle(frame, (w - 30, 25), 10, (0, 0, 220), -1)
 
-    cv2.imshow("手語資料收集（自動模式）", frame)
+    cv2.imshow("手語資料收集", frame)
     key = cv2.waitKey(1) & 0xFF
 
     if key == ord('q'):
@@ -171,12 +176,14 @@ while cap.isOpened():
         state = "waiting"
         sequence = []
         hold_count = 0
+        paused = True  
         print(f"[切換] -> {GESTURES[current_gesture]}")
     elif key == ord('p'):
         current_gesture = (current_gesture - 1) % len(GESTURES)
         state = "waiting"
         sequence = []
         hold_count = 0
+        paused = True  
         print(f"[切換] -> {GESTURES[current_gesture]}")
     elif key == ord('r'):
         # 重置此詞彙的資料
@@ -187,7 +194,30 @@ while cap.isOpened():
         state = "waiting"
         sequence = []
         hold_count = 0
+        paused = False
         print(f"[重置] {label} 的資料已清除")
+    elif key == ord('d'):
+        folder = os.path.join(DATA_DIR, label)
+        samples = [f for f in os.listdir(folder) if f.endswith('.npy')]
+        if samples:
+            samples.sort(key=lambda x: int(os.path.splitext(x)[0]))
+            last_file = samples[-1]
+            os.remove(os.path.join(folder, last_file))
+            state = "waiting"
+            sequence = []
+            hold_count = 0
+            print(f"[刪除] 已移除 {label} 的上一筆資料：{last_file}")
+        else:
+            print(f"[刪除] {label} 尚無資料可刪除")
+    elif key == ord('s'):
+        paused = not paused
+        if paused:
+            state = "waiting"
+            sequence = []
+            hold_count = 0
+            print("暫停")
+        else:
+            print("恢復")
 
 cap.release()
 cv2.destroyAllWindows()
@@ -204,6 +234,6 @@ for g in GESTURES:
     print(f"  [{status}] {g:6s}  {bar} {n}/{SAMPLES_PER_CLASS}")
 
 if all_done:
-    print("\n全部詞彙收集完成！執行 python train_model.py 開始訓練")
+    print("\n全部詞彙收集完成")
 else:
-    print("\n尚有未完成的詞彙，請繼續收集後再訓練")
+    print("\n還沒完成")
