@@ -1,13 +1,13 @@
 # 台灣手語即時翻譯系統
 
-> 朝陽科技大學 專題作品  
-> 結合 MediaPipe 手部關鍵點辨識 + 本地分類模型 + Gemini AI 語意修正
+> 朝陽科技大學 專題作品
+> 結合 MediaPipe 手部關鍵點擷取 + 本地分類模型 + Gemini AI 語意修正
 
 ---
 
 ## 專題簡介
 
-本系統透過攝影機即時擷取手語動作，利用 MediaPipe 偵測手部關鍵點，搭配本地訓練的機器學習模型進行手語詞彙辨識，最後呼叫 Gemini AI 將辨識出的詞彙序列修飾成自然流暢的中文句子，並透過語音合成朗讀輸出。
+本系統透過攝影機擷取手語動作，使用 MediaPipe 偵測手部關鍵點，搭配本地訓練模型辨識詞彙，並透過 Gemini AI 將詞彙序列修飾成自然中文句子。
 
 ### 系統流程
 
@@ -16,11 +16,11 @@
   ↓
 MediaPipe（手部關鍵點擷取）
   ↓
-本地分類模型（即時辨識詞彙，無需網路）
+本地分類模型（即時辨識詞彙）
   ↓
 詞彙緩衝區（累積詞彙）
-  ↓ 按下翻譯
-Gemini AI（語意修正成自然句子）
+  ↓
+Gemini AI（句子修飾）
   ↓
 文字顯示 + 語音朗讀
 ```
@@ -30,30 +30,24 @@ Gemini AI（語意修正成自然句子）
 ## 專案結構
 
 ```
-sign-language-translator/
-├── app.py                  # Streamlit 主程式（入口）
+CYUT_MDFK/
 ├── collect_data.py         # 錄製手語訓練資料
 ├── train_model.py          # 訓練本地分類模型
-│
-├── src/
-│   ├── vocab.py            # 詞彙管理（從 JSON 讀取）
-│   ├── camera.py           # 攝影機 + MediaPipe 手部偵測
-│   ├── gemini_api.py       # Gemini Vision 手語辨識（備用）
-│   ├── claude_api.py       # Gemini 語意修正
-│   └── tts.py              # Google TTS 語音合成
-│
-├── data/
-│   ├── vocabulary.json     # 詞彙清單（統一管理）
-│   ├── keypoints.csv       # 錄製的訓練資料（自動產生）
-│   └── model.pkl           # 訓練好的模型（自動產生）
-│
-├── history/                # 翻譯紀錄（自動產生）
-│
-├── .env                    # API 金鑰（不可上傳 GitHub）
-├── .env.example            # 金鑰範本
-├── .gitignore
+├── test_model.py           # 即時辨識測試
+├── README.md
 ├── requirements.txt
-└── README.md
+├── data/
+│   ├── vocabulary.json     # 詞彙清單
+│   ├── keypoints.csv       # 訓練資料紀錄檔
+│   └── model.pkl           # 訓練好的模型
+├── dynamic_dataset/        # 手語訓練資料資料夾
+├── history/                # 翻譯紀錄
+└── src/
+    ├── camera.py          # 本地辨識與手部特徵萃取
+    ├── gemini_api.py      # Gemini API 語意修正
+    ├── tts.py             # 語音合成模組
+    ├── vocab.py           # 詞彙管理工具
+    └── font_utils.py      # 文字繪製工具
 ```
 
 ---
@@ -62,7 +56,7 @@ sign-language-translator/
 
 - Python 3.10 以上（建議）
 - 有攝影機的電腦
-- Gemini API 金鑰（[取得方式](#-api-金鑰取得)）
+- Gemini API 金鑰（如果要使用 `src/gemini_api.py`）
 
 ---
 
@@ -74,16 +68,12 @@ sign-language-translator/
 pip install -r requirements.txt
 ```
 
-### 2. 設定 API 金鑰
+### 2. 設定環境變數
+
+建立 `.env` 檔案，並加入：
 
 ```bash
-cp .env.example .env
-```
-
-用文字編輯器打開 `.env`，填入你的 Gemini API 金鑰：
-
-```
-GEMINI_API_KEY=你的金鑰貼這裡
+GEMINI_API_KEY=YOUR_GEMINI_API_KEY_HERE
 ```
 
 ### 3. 建立必要資料夾
@@ -91,14 +81,6 @@ GEMINI_API_KEY=你的金鑰貼這裡
 ```bash
 mkdir history
 ```
-
-### 4. 測試 API 連線
-
-```bash
-python test_gemini.py
-```
-
-出現模型清單表示連線成功。
 
 ---
 
@@ -114,12 +96,13 @@ python collect_data.py
 
 | 按鍵 | 動作 |
 |------|------|
-| 數字 `0`～`9` | 選擇詞彙（對應 vocabulary.json 的順序） |
+| 數字 `0`～`9` | 選擇詞彙（對應 `data/vocabulary.json` 的順序） |
 | `R` | 開始錄製 |
 | `S` | 暫停錄製 |
-| `Q` | 離開，並顯示各詞彙收集統計 |
+| `D` | 刪除上一筆訓練資料｜
+| `Q` | 離開 |
 
-> 每個詞彙建議錄製 **100 筆**，光線充足、手放畫面正中央效果最好。
+> 建議每個詞彙錄製 100 筆以上，光線充足且手放畫面中央效果較好。
 
 ### Step 2｜訓練模型
 
@@ -127,21 +110,15 @@ python collect_data.py
 python train_model.py
 ```
 
-訓練完成後會在 `data/` 自動產生 `model.pkl`，並顯示各詞彙的辨識準確率。
+訓練完成後會在 `data/model.pkl` 產生模型檔案。
 
-### Step 3｜啟動系統
+### Step 3｜測試模型
 
 ```bash
-streamlit run app.py
+python test_model.py
 ```
 
-瀏覽器會自動開啟，允許使用攝影機即可開始使用。
-
-**介面操作：**
-1. 對著攝影機比手語，系統即時辨識並累積詞彙
-2. 辨識到的詞彙顯示在右側「辨識詞彙」區塊
-3. 按「翻譯句子」→ Gemini AI 修正成自然中文並播放語音
-4. 按「清除重來」→ 重新開始
+系統會啟動攝影機，並即時顯示辨識結果。
 
 ---
 
@@ -162,54 +139,46 @@ streamlit run app.py
 }
 ```
 
-**新增詞彙只需要：**
-1. 在 `vocabulary.json` 加入新詞彙
-2. 重新執行 `collect_data.py` 錄製新詞彙的資料
-3. 重新執行 `train_model.py` 訓練模型
+新增詞彙流程：
 
-不需要修改任何程式碼。
+1. 編輯 `data/vocabulary.json`
+2. 重新執行 `python collect_data.py` 錄製新詞彙資料
+3. 重新執行 `python train_model.py` 訓練模型
 
 ---
 
 ## API 金鑰取得
 
 1. 前往 [Google AI Studio](https://aistudio.google.com/app/apikey)
-2. 登入有訂閱 Google AI Pro 的 Google 帳號
-3. 點擊「Create API key」
-4. 複製金鑰貼入 `.env` 檔案
+2. 登入支援的 Google 帳號
+3. 建立 API Key
+4. 將金鑰貼入 `.env`
 
 ---
 
 ## 常見問題
 
-**攝影機打不開**  
-將 `camera.py` 中的 `VideoCapture(0)` 改為 `(1)` 或 `(2)`。
+**攝影機打不開**
+將 `src/camera.py` 中的 `cv2.VideoCapture(0)` 改為 `(1)` 或 `(2)`。
 
-**MediaPipe 安裝失敗（M1/M2 Mac）**  
+**MediaPipe 安裝失敗（M1/M2 Mac）**
+
 ```bash
 pip install mediapipe --no-binary mediapipe
 ```
 
-**辨識率低**  
+**辨識率低**
 - 確認光線充足
 - 手部佔畫面比例至少 1/3
-- 每個詞彙增加錄製筆數至 200 筆
-
-**Gemini 回傳 429 錯誤**  
-API 配額不足，確認 API Key 綁定到付費帳號，或稍等幾分鐘再試。
+- 每個詞彙增加錄製筆數
 
 ---
 
-## 📦 套件清單
+## 套件清單
 
 | 套件 | 用途 |
 |------|------|
-| streamlit | 網頁介面 |
-| mediapipe | 手部關鍵點偵測 |
-| google-genai | Gemini API |
 | scikit-learn | 本地分類模型 |
 | gtts | 語音合成 |
 | opencv-python | 影像處理 |
 | python-dotenv | 環境變數管理 |
-
-*最後更新：2025*

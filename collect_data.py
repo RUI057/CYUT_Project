@@ -18,12 +18,12 @@ font_large  = get_font(50)
 font_medium = get_font(40)
 font_small  = get_font(40)
 
-# ── 設定 ──────────────────────────────────────
+# ── 設定 
 GESTURES         = get_all_labels()
 SEQUENCE_LENGTH  = 30   # 每筆幾幀
-SAMPLES_PER_CLASS = 80  # 每個詞彙幾筆
+SAMPLES_PER_CLASS = 100  # 每個詞彙幾筆
 HOLD_FRAMES      = 15   # 手穩定幾幀後自動開始錄製
-COOLDOWN_FRAMES  = 20   # 每筆錄完後冷卻幾幀（避免連續誤觸）
+COOLDOWN_FRAMES  = 5   # 每筆錄完後冷卻幾幀
 DATA_DIR         = "dynamic_dataset"
 
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -68,8 +68,8 @@ for i, g in enumerate(GESTURES):
     existing = len(os.listdir(os.path.join(DATA_DIR, g)))
     status   = "OK" if existing >= SAMPLES_PER_CLASS else f"{existing}/{SAMPLES_PER_CLASS}"
     print(f"  {i:2d} = {g:6s}  [{status}]")
-print("\n[操作] N=下一個  P=上一個  R=重置此詞彙  D=刪除上一個  S=暫停/繼續偵測  Q=離開")
-print("[提示] 按 S 可暫停偵測避免誤觸，按 D 可刪除上一筆已儲存資料\n")
+print("\nN=下一個  P=上一個  R=重置此詞彙  D=刪除上一個  S=暫停/繼續偵測  Q=離開")
+print("按 S 可暫停偵測避免誤觸，按 D 可刪除上一筆已儲存資料\n")
 
 while cap.isOpened():
     ret, frame = cap.read()
@@ -160,7 +160,7 @@ while cap.isOpened():
 
     # 操作提示
     frame = put_text(frame, "N=下一個  P=上一個  R=重置  D=刪除上一個  S=暫停/繼續  Q=離開",
-                     (10, h - 45), font_small, (120, 120, 120))
+                     (10, h - 90), font_small, (120, 120, 120))
 
     # 錄製中閃爍紅點
     if state == "recording":
