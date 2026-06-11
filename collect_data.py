@@ -68,7 +68,7 @@ for i, g in enumerate(GESTURES):
     existing = len(os.listdir(os.path.join(DATA_DIR, g)))
     status   = "OK" if existing >= SAMPLES_PER_CLASS else f"{existing}/{SAMPLES_PER_CLASS}"
     print(f"  {i:2d} = {g:6s}  [{status}]")
-print("\nN=下一個  P=上一個  R=重置此詞彙  D=刪除上一個  S=暫停/繼續偵測  Q=離開")
+print("\nN=下一個  M=上一個  R=重置此詞彙  D=刪除上一個  S=暫停/繼續偵測  Q=離開")
 print("按 S 可暫停偵測避免誤觸，按 D 可刪除上一筆已儲存資料\n")
 
 while cap.isOpened():
@@ -159,7 +159,7 @@ while cap.isOpened():
     cv2.rectangle(frame, (10, h - 25), (10 + filled, h - 8), (0, 180, 80), -1)
 
     # 操作提示
-    frame = put_text(frame, "N=下一個  P=上一個  R=重置  D=刪除上一個  S=暫停/繼續  Q=離開",
+    frame = put_text(frame, "N=下一個  M=上一個  R=重置  D=刪除上一個  S=暫停/繼續  Q=離開",
                      (10, h - 90), font_small, (120, 120, 120))
 
     # 錄製中閃爍紅點
@@ -178,7 +178,7 @@ while cap.isOpened():
         hold_count = 0
         paused = True  
         print(f"[切換] -> {GESTURES[current_gesture]}")
-    elif key == ord('p'):
+    elif key == ord('m'):
         current_gesture = (current_gesture - 1) % len(GESTURES)
         state = "waiting"
         sequence = []
