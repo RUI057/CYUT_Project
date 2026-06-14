@@ -1,250 +1,198 @@
-# 台灣手語即時翻譯系統
+# 台灣手語即時辨識系統
 
-> 朝陽科技大學 專題作品
-> 結合 MediaPipe 手部關鍵點擷取 + PyTorch LSTM 時間序列模型 + Gemini AI 語意修正
+手語詞彙識別與自然語言轉換系統，使用深度學習進行即時的手語動作識別。
 
----
+## 概述
 
-## 專題簡介
+本項目結合 MediaPipe 手部關鍵點檢測、PyTorch LSTM 時間序列模型及 Gemini API，建構一套從手語捕捉、特徵提取、詞彙識別到自然語言轉換的完整流程。系統支持本地訓練與推理，同時提供文字轉語音功能。
 
-本系統透過攝影機擷取手語動作，使用 MediaPipe 偵測手部關鍵點，搭配本地訓練的 LSTM 時間序列模型辨識詞彙，並透過 Gemini AI 將詞彙序列修飾成自然中文句子，最後使用 Google TTS 進行語音朗讀。
+## 核心功能
 
-### 系統流程
+- 攝影機實時手語捕捉與特徵提取
+- 基於 LSTM 的時間序列詞彙識別
+- Gemini API 語義修正與自然句子生成
+- Google TTS 文字語音合成
+- 訓練資料的自動收集與管理
 
-```
-攝影機
-  ↓
-MediaPipe（手部關鍵點擷取）
-  ↓
-特徵序列（126維度 x 30幀）
-  ↓
-PyTorch LSTM（即時辨識詞彙）
-  ↓
-詞彙緩衝區（累積20幀確認）
-  ↓
-Gemini AI（句子修飾 + 語意理解）
-  ↓
-Google TTS（文字轉語音）
-  ↓
-螢幕顯示 + 語音朗讀
-```
-
----
-
-## 專案結構
+## 項目結構
 
 ```
 CYUT_MDFK/
-├── collect_data.py         # 錄製手語訓練資料
-├── train_model.py          # 訓練 PyTorch LSTM 模型
-├── test_model.py           # 即時辨識測試
-├── README.md
-├── requirements.txt
+├── app.py                    網頁即時翻譯（Streamlit，推薦入口）
+├── collect_data.py           收集訓練資料
+├── train_model.py            LSTM 模型訓練
+├── test_model.py             實時識別測試
+├── hand_landmarker.task      MediaPipe 模型文件
+├── requirements.txt          Python 依賴
 ├── data/
-│   ├── vocabulary.json     # 詞彙清單
-│   ├── keypoints.csv       # 訓練資料紀錄檔
-│   └── model.pkl           # 訓練好的模型
-├── dynamic_dataset/        # 手語訓練資料資料夾
-├── history/                # 翻譯紀錄
+│   ├── vocabulary.json       詞彙列表
+│   ├── keypoints.csv         訓練數據紀錄
+│   └── 手語演示網址.txt
+├── dynamic_dataset/          訓練數據目錄（按詞彙分類）
+│   ├── 工作/
+│   ├── 你好/
+│   ├── 謝謝/
+│   └── ... (25 個詞彙)
+├── history/                  識別紀錄
+│   └── records.json
 └── src/
-    ├── camera.py           # 本地辨識與手部特徵萃取
-    ├── gemini_api.py       # Gemini API 語意修正
-    ├── tts.py              # 語音合成模組
-    ├── vocab.py            # 詞彙管理工具
-    └── font_utils.py       # 文字繪製工具
+    ├── camera.py             攝影機與特徵提取
+    ├── features.py           特徵預處理與增強
+    ├── vocab.py              詞彙管理
+    ├── gemini_api.py         Gemini API 接口
+    ├── tts.py                文字轉語音
+    └── font_utils.py         文字繪製工具
 ```
 
----
+## 工作流程
 
-## 環境需求
-
-- Python 3.10 以上（建議）
-- 有攝影機的電腦
-- 支援 GPU 加速更佳（支援 CUDA 和 Apple Silicon MPS）
-- Google Gemini API 金鑰（如果要使用語意修正功能）
-
----
-
-## 安裝步驟
-
-### 1. 安裝套件
-
-```bash
-pip install -r requirements.txt
-```
-
-### 2. 設定環境變數
-
-建立 `.env` 檔案，並加入：
-
-```bash
-GEMINI_API_KEY=YOUR_GEMINI_API_KEY_HERE
-```
-
-### 3. 建立必要資料夾
-
-```bash
-mkdir history
-```
-
----
-
-## 使用流程
-
-### Step 1｜錄製手語訓練資料
+### 數據收集
 
 ```bash
 python collect_data.py
 ```
 
-**操作方式：**
+選定詞彙後，手部穩定出現即自動連續錄製每筆 30 幀序列。按鍵控制：
+- N / M: 下一個 / 上一個詞彙
+- R: 重置目前詞彙的所有資料
+- D: 刪除上一筆
+- S: 暫停 / 繼續偵測（切換詞彙時會自動暫停，避免誤觸）
+- Q: 離開
 
-| 按鍵 | 動作 |
-|------|------|
-| 數字 `0`～`9` | 選擇詞彙（對應 `data/vocabulary.json` 的順序） |
-| `R` | 開始錄製 |
-| `S` | 暫停錄製 |
-| `D` | 刪除上一筆訓練資料｜
-| `Q` | 離開 |
-
-> 建議每個詞彙錄製 100 筆以上，光線充足且手放畫面中央效果較好。
-
-### Step 2｜訓練模型
+### 模型訓練
 
 ```bash
 python train_model.py
 ```
 
-訓練完成後會在 `data/model.pkl` 產生模型檔案。
+使用 dynamic_dataset 中的訓練數據訓練 LSTM 模型。訓練參數：
+- 序列長度: 30 幀
+- 特徵維度: 126 (雙手 × 21 關鍵點 × 3 軸 xyz)
+- 隱藏層: 128 單位，2 層雙向
+- 批次: 32
+- 訓練周期: 60
+- 學習率: 1e-3
 
-### Step 3｜測試模型
+訓練時自動套用尺度正規化、資料增強（時間伸縮 / 旋轉 / 抖動）與類別權重（緩解樣本不平衡）。
+訓練結束會印出 classification report 與「最常誤判的詞對」，並生成 data/model.pkl。
+
+### 實時測試
 
 ```bash
 python test_model.py
 ```
 
-系統會啟動攝影機，並即時顯示辨識結果。
+啟動攝影機進行即時識別（OpenCV 視窗）。
 
----
+### 網頁即時翻譯（推薦）
 
-## 技術特點
+```bash
+streamlit run app.py
+```
 
-- **即時處理**：30幀序列 (約1秒) 進行一次推理
-- **自動確認**：連續20幀正確判斷才確認詞彙
-- **GPU 加速**：支援 CUDA、Apple Silicon (MPS)、CPU 自動選擇
-- **特徵工程**：126維度手部關鍵點特徵 (21個關鍵點 × 6 = 126)
-- **序列模型**：雙向 LSTM (128 hidden units, 2 layers)
+瀏覽器開啟後，勾選「啟動攝影機」即可：
+
+1. 對著鏡頭比手語，系統即時辨識並累積詞彙
+2. 手離開畫面（停頓）→ 自動將詞彙序列送 Gemini 轉成自然中文句子
+3. gTTS 朗讀句子，並保存到翻譯紀錄
+4. 也可手動按「翻譯 / 朗讀 / 清除」，左側側邊欄可調信心門檻與確認幀數
+
+## 環境要求
+
+- Python 3.10+
+- 攝影機設備
+- Gemini API 密鑰（網頁語義翻譯需要；純辨識測試 test_model.py 可不用）
+- GPU 支持加速（CUDA 或 Apple Silicon MPS），可選
+
+## 安裝與配置
+
+### 1. 安裝依賴
+
+```bash
+pip install -r requirements.txt
+```
+
+### 2. 配置環境變量
+
+創建 .env 文件：
+
+```
+GEMINI_API_KEY=your_api_key_here
+```
+
+### 3. 準備目錄
+
+```bash
+mkdir -p history
+```
+
+## 技術細節
+
+### 特徵提取
+
+使用 MediaPipe 檢測雙手各 21 個關鍵點的 (x, y, z) 座標，相對手腕做平移正規化（左手 63 維 + 右手 63 維 = 126 維）。餵入模型前再對每隻手做尺度正規化（除以手部大小），消除離鏡頭遠近造成的誤判。特徵抽取與正規化集中於 `src/features.py`，收集 / 訓練 / 推理三端共用以確保一致。
 
 ### 模型架構
 
-```
-輸入層 (30, 126)
-  ↓
-Bidirectional LSTM
-  - Hidden: 128 units
-  - Layers: 2
-  - Dropout: 0.3
-  ↓
-Dropout (0.3)
-  ↓
-全連接層
-  - FC1: 128 → 64 (ReLU)
-  - Dropout: 0.3
-  - FC2: 64 → num_classes
-  ↓
-輸出層 (softmax probability)
-```
+雙向 LSTM 用于捕捉時間序列中的手語動作特征：
+- 輸入: (batch_size, 30, 126)
+- 雙向 LSTM: 128 隱藏單位，2 層（輸出 256 維 / 幀）
+- 特徵融合: 時間維度平均池化 + 最大池化（256 × 2 = 512 維）
+- 全連接層: 512 -> 64 (ReLU) -> num_classes
 
----
+### 詞彙管理
 
-## 詞彙管理
+vocabulary.json 定義所有可識別的詞彙，修改后需重新收集數據並訓練模型。
 
-所有詞彙統一在 `data/vocabulary.json` 管理：
+## 詞彙列表
 
-```json
-{
-  "groups": [
-    {
-      "id": 1,
-      "name": "基本問候",
-      "priority": "高",
-      "labels": ["你好", "再見", "謝謝", "對不起", "沒關係", "請"]
-    }
-  ]
-}
-```
+當前支持 25 個詞彙，存儲在 dynamic_dataset 目錄中：
 
-新增詞彙流程：
+工作、不好、不要、他、去、再見、吃飯、名字、好、你、你好、我、沒關係、來、看醫生、要、喜歡、喝水、睡覺、對不起、請、學校、錢、幫忙、謝謝
 
-1. 編輯 `data/vocabulary.json`
-2. 重新執行 `python collect_data.py` 錄製新詞彙資料
-3. 重新執行 `python train_model.py` 訓練模型
+## 依賴包
 
----
-
-## API 金鑰取得
-
-1. 前往 [Google AI Studio](https://aistudio.google.com/app/apikey)
-2. 登入支援的 Google 帳號
-3. 建立 API Key
-4. 將金鑰貼入 `.env`
-
----
-
-**辨識率低**
-- 確認光線充足
-- 手部佔畫面比例至少 1/3
-- 每個詞彙增加錄製筆數
-
----
-
-## 套件清單
-
-| 套件 | 用途 |
+| 包名 | 功能 |
 |------|------|
-| torch | 深度學習框架 (LSTM 時間序列模型) |
-| mediapipe | 手部關鍵點偵測 |
-| opencv-python | 影像處理與攝影機控制 |
-| google-genai | Gemini API 語意修正 |
-| gtts | 文字轉語音 |
-| streamlit | 網頁應用框架 (可選) |
-| python-dotenv | 環境變數管理 |
-| pillow | 圖像處理 |
+| torch | 深度學習框架 |
+| mediapipe | 手部關鍵點檢測 |
+| matplotlib | mediapipe 繪圖相依（必裝） |
+| opencv-python | 圖像處理與攝影機控制 |
+| google-genai | Gemini API 調用 |
+| gtts | 文字語音合成 |
 | numpy | 數值計算 |
-| scikit-learn | 資料預處理 |
-| pandas | 資料處理 |
+| scikit-learn | 數據預處理 |
+| pandas | 數據處理 |
+| pillow | 圖像操作 |
+| python-dotenv | 環境變量管理 |
+| streamlit | 網頁即時翻譯介面 |
 
----
+## 使用建議
 
-## 效能指標 (參考)
+- 每個詞彙至少收集 100 筆數據
+- 確保光線充足
+- 手部應佔屏幕至少 1/3
+- 在多種環境下測試以提高泛化性能
 
-基於訓練資料集 (25 個詞彙，每個 100-130 筆)：
+## 性能參考
 
-- **辨識準確率**：~85-90% (依詞彙清晰度)
-- **推理延遲**：50-100 ms (GPU) / 200-300 ms (CPU)
-- **記憶體佔用**：500 MB - 2 GB (依設備)
+基于 25 詞彙、每詞 100-130 筆訓練數據：
+- 識別準確率: 85-90%
+- 推理延遲: 50-100ms (GPU) / 200-300ms (CPU)
+- 內存占用: 500MB - 2GB
 
-> 實際效能取決於：手部清晰度、光線條件、訓練資料品質
+## 更新紀錄
 
----
+2026.6.14 - 引入深度學習，採用 PyTorch + Bi-LSTM 
+2026.6.15 - 接入網頁
+2026.6.15 - 尺度正規化 + 資料增強 + 類別權重 + mean/max 池化，降低手勢誤判
 
-## 更新
+## 未來計劃
 
-```bash
-    2026.6.14
-      修改成動態辨識 導入深度學習 
-      PyTorch + Bi-LSTM
-```
----
-
-## 未來改進計劃
-
-- [ ] 使用爬蟲技術整合台灣手語資料庫進行訓練
-- [ ] 加入更多詞彙 (目前 25 個)
-- [ ] 語意修飾模型本地化（減少 API 調用）
-- [ ] 詞彙斷句與自動觸發機制
-- [ ] 整合 MediaPipe Holistic（全身姿勢識別）
-- [ ] 使用 Docker 容器化部署
-- [ ] 網頁應用界面 (基於 Streamlit)
-- [ ] 離線模式支援
-- [ ] 多手語言支援
+- 擴展詞彙數量
+- 本地化語義修正模型，減少 API 調用
+- 自動詞彙斷句與觸發機制
+- 全身姿勢識別支持
+- Docker 容器化部署
+- 離線模式支持
+- 多語言手語支持

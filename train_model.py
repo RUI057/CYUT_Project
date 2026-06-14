@@ -1,16 +1,18 @@
 import numpy as np
 import os, sys, pickle
 from pathlib import Path
+from collections import Counter
 
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
-from sklearn.metrics import classification_report
+from sklearn.metrics import classification_report, confusion_matrix
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from src.vocab import get_all_labels
+from src.features import normalize_sequence, augment_sequence
 
 # ── 參數 ──────────────────────────────────────
 GESTURES  = get_all_labels()
@@ -66,15 +68,24 @@ X_tr, X_te, y_tr, y_te = train_test_split(
     X, y, test_size=0.2, random_state=42, stratify=y)
 
 # ── Dataset ───────────────────────────────────
+# X 保持 raw（減手腕）；訓練時即時增強，所有資料餵模型前才做尺度正規化
 class GestureDataset(Dataset):
-    def __init__(self, X, y):
-        self.X = torch.tensor(X)
-        self.y = torch.tensor(y, dtype=torch.long)
+    def __init__(self, X, y, augment=False, seed=0):
+        self.X = X                       # raw float32 (N, 30, 126)
+        self.y = y
+        self.augment = augment
+        self.rng = np.random.default_rng(seed)
     def __len__(self):  return len(self.X)
-    def __getitem__(self, i): return self.X[i], self.y[i]
+    def __getitem__(self, i):
+        seq = self.X[i]
+        if self.augment:
+            seq = augment_sequence(seq, self.rng)
+        seq = normalize_sequence(seq)
+        return (torch.tensor(seq, dtype=torch.float32),
+                torch.tensor(self.y[i], dtype=torch.long))
 
-train_loader = DataLoader(GestureDataset(X_tr, y_tr), batch_size=BATCH, shuffle=True)
-test_loader  = DataLoader(GestureDataset(X_te, y_te), batch_size=BATCH)
+train_loader = DataLoader(GestureDataset(X_tr, y_tr, augment=True),  batch_size=BATCH, shuffle=True)
+test_loader  = DataLoader(GestureDataset(X_te, y_te, augment=False), batch_size=BATCH)
 
 # ── LSTM 模型 ─────────────────────────────────
 class GestureLSTM(nn.Module):
@@ -90,17 +101,17 @@ class GestureLSTM(nn.Module):
         )
         self.dropout = nn.Dropout(dropout)
         self.fc = nn.Sequential(
-            nn.Linear(hidden * 2, 64),  # 雙向所以 *2
+            nn.Linear(hidden * 4, 64),  # 雙向(*2) × (mean+max 池化)(*2)
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(64, num_classes)
         )
 
     def forward(self, x):
-        out, _ = self.lstm(x)       # (batch, seq, hidden*2)
-        out = out[:, -1, :]         # 取最後一幀
-        out = self.dropout(out)
-        return self.fc(out)
+        out, _ = self.lstm(x)               # (batch, seq, hidden*2)
+        feat = torch.cat([out.mean(1),      # 時間維度 mean + max 池化，
+                          out.max(1).values], dim=1)  # 比只取最後一幀更穩
+        return self.fc(self.dropout(feat))
 
 model = GestureLSTM(
     feat_dim=FEAT_DIM,
@@ -114,7 +125,12 @@ print(f"\n[模型] 參數量：{sum(p.numel() for p in model.parameters()):,}")
 # ── 訓練 ──────────────────────────────────────
 optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=1e-4)
 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
-criterion = nn.CrossEntropyLoss()
+
+# 類別權重：樣本少的詞（如醫生 60 筆）給較高權重，避免被多數詞淹沒
+counts  = Counter(y_tr)
+weights = torch.tensor([1.0 / counts[c] for c in range(N_CLASS)], dtype=torch.float32)
+weights = weights / weights.sum() * N_CLASS          # 正規化，平均權重 ≈ 1
+criterion = nn.CrossEntropyLoss(weight=weights.to(DEVICE))
 
 best_acc  = 0.0
 best_state = None
@@ -167,6 +183,21 @@ with torch.no_grad():
 
 print("\n[最終結果]")
 print(classification_report(all_true, all_pred, target_names=classes))
+
+# ── 混淆診斷：列出最常互相誤判的詞對 ──────────
+cm = confusion_matrix(all_true, all_pred, labels=range(N_CLASS))
+pairs = [
+    (cm[i, j], classes[i], classes[j])
+    for i in range(N_CLASS) for j in range(N_CLASS)
+    if i != j and cm[i, j] > 0
+]
+pairs.sort(reverse=True)
+print("[最常誤判的詞對]  真實 → 被預測成")
+if pairs:
+    for cnt, true_w, pred_w in pairs[:12]:
+        print(f"  {true_w} → {pred_w}：{cnt} 筆")
+else:
+    print("  測試集無誤判")
 
 # ── 儲存 ──────────────────────────────────────
 os.makedirs("data", exist_ok=True)
