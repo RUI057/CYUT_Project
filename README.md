@@ -228,26 +228,13 @@ Dropout (0.3)
 
 ---
 
-## 快速命令參考
+## 更新
 
 ```bash
-# 環境設置
-pip install -r requirements.txt
-echo "GEMINI_API_KEY=your_key_here" > .env
-
-# 數據收集
-python collect_data.py
-
-# 模型訓練
-python train_model.py
-
-# 實時測試
-python test_model.py
-
-# 查看依賴版本
-pip list | grep -E "torch|mediapipe|opencv"
+    2026.6.14
+      修改成動態辨識 導入深度學習 
+      PyTorch + Bi-LSTM
 ```
-
 ---
 
 ## 未來改進計劃
