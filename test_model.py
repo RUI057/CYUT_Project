@@ -10,6 +10,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 sys.path.insert(0, __import__('os').path.dirname(__import__('os').path.abspath(__file__)))
 from src.font_utils import get_font, put_text
+from src.features import extract_two_hands, normalize_sequence
 
 # ── LSTM 定義（與 train_model.py 一致）────────
 class GestureLSTM(nn.Module):
@@ -19,12 +20,13 @@ class GestureLSTM(nn.Module):
                             batch_first=True, dropout=dropout, bidirectional=True)
         self.dropout = nn.Dropout(dropout)
         self.fc = nn.Sequential(
-            nn.Linear(hidden * 2, 64), nn.ReLU(),
+            nn.Linear(hidden * 4, 64), nn.ReLU(),
             nn.Dropout(dropout), nn.Linear(64, num_classes)
         )
     def forward(self, x):
         out, _ = self.lstm(x)
-        return self.fc(self.dropout(out[:, -1, :]))
+        feat = torch.cat([out.mean(1), out.max(1).values], dim=1)
+        return self.fc(self.dropout(feat))
 
 # ── 載入模型 ──────────────────────────────────
 try:
@@ -61,27 +63,14 @@ font_large  = get_font(44)
 font_medium = get_font(28)
 font_small  = get_font(20)
 
-# ── 特徵擷取 ──────────────────────────────────
-def extract_two_hands(results):
-    left  = [0.0] * 63
-    right = [0.0] * 63
-    if results.multi_hand_landmarks and results.multi_handedness:
-        for hand_lms, handedness in zip(results.multi_hand_landmarks,
-                                        results.multi_handedness):
-            lbl   = handedness.classification[0].label
-            wrist = hand_lms.landmark[0]
-            feat  = []
-            for lm in hand_lms.landmark:
-                feat += [lm.x - wrist.x, lm.y - wrist.y, lm.z - wrist.z]
-            if lbl == "Left":  left  = feat
-            else:              right = feat
-    return left + right
+# 特徵擷取改用 src/features.extract_two_hands（與 collect/train 共用，確保一致）
 
 # ── 參數 ──────────────────────────────────────
-CONF_THRESH     = 0.80   # 提高門檻，減少誤判
-CONFIRM_FRAMES  = 20
-COOLDOWN_FRAMES = 40     # 確認後冷卻更長
+CONF_THRESH     = 0.80   # 信心度門檻
+CONFIRM_FRAMES  = 20     # 同一詞連續幾幀才確認
+COOLDOWN_FRAMES = 40     # 確認後冷卻幾幀
 NO_HAND_CLEAR   = 10     # 手消失幾幀後清空 buffer
+MOTION_THRESH   = 0.005  # 動作門檻，調高=更難觸發，調低=更容易觸發
 
 # ── 開啟攝影機 ────────────────────────────────
 cap = cv2.VideoCapture(0)
@@ -98,9 +87,11 @@ cooldown       = 0
 confirmed_word = ""
 confirmed_conf = 0.0
 result_history = deque(maxlen=6)
-no_hand_count  = 0    # 連續無手幀數
+no_hand_count  = 0
+motion_score   = 0.0   # 即時動作分數
 
-print("\n[操作]  C=清除  Q=離開\n")
+print(f"\n[動作門檻] MOTION_THRESH = {MOTION_THRESH}")
+print("[操作]  C=清除  Q=離開\n")
 
 while True:
     ret, frame = cap.read()
@@ -133,18 +124,16 @@ while True:
         cooldown -= 1
     elif hand_detected and len(buffer) == seq_len:
         
-        # [新增] 檢查 30 幀內的特徵變化量
-        # 計算所有特徵在時間軸上的標準差的平均值
-        motion_variance = np.std(np.array(buffer), axis=0).mean()
-        MOTION_THRESH = 0.005  # 這個門檻值需要你實測微調 (通常在 0.002 ~ 0.01 之間)
+        # 計算動作幅度
+        motion_score = float(np.std(np.array(buffer), axis=0).mean())
 
-        if motion_variance < MOTION_THRESH:
+        if motion_score < MOTION_THRESH:
             # 變化量太小，代表手是靜止的，跳過預測
             pass 
         else:
-            # 原本的預測邏輯
-            x = torch.tensor(np.array(buffer), dtype=torch.float32)
-            x = x.unsqueeze(0).to(device)
+            # 餵模型前做尺度正規化（與訓練一致）
+            seq = normalize_sequence(np.array(buffer))
+            x = torch.tensor(seq, dtype=torch.float32).unsqueeze(0).to(device)
             with torch.no_grad():
                 proba = torch.softmax(model(x), dim=1)[0]
             conf, idx = proba.max(0)
@@ -171,7 +160,7 @@ while True:
         confirm_word  = ""
         confirm_count = 0
         cooldown      = COOLDOWN_FRAMES
-        buffer.clear()   # ← 關鍵：清空舊幀，避免殘留誤判
+        buffer.clear()   # 清空舊幀，避免殘留誤判
 
     # ── 畫面 ──────────────────────────────────
     buf_pct = int(len(buffer) / seq_len * 100)
@@ -214,7 +203,11 @@ while True:
         frame = put_text(frame, f"{word}  {conf:.0%}",
                          (w-190, 36+i*30), font_small, (b,b,b))
 
-    cv2.putText(frame, "C=clear  Q=quit", (10, h-60),
+    # 動作分數（幫助校準 MOTION_THRESH）
+    mc = (0, 220, 80) if motion_score >= MOTION_THRESH else (80, 80, 200)
+    cv2.putText(frame, f"Motion:{motion_score:.4f}/{MOTION_THRESH}",
+                (10, h-60), cv2.FONT_HERSHEY_SIMPLEX, 0.45, mc, 1)
+    cv2.putText(frame, "C=clear  Q=quit", (10, h-44),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.45, (100,100,100), 1)
 
     cv2.imshow("手語模型測試 (LSTM)", frame)

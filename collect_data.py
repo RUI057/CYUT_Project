@@ -7,6 +7,7 @@ from PIL import Image, ImageDraw, ImageFont  # noqa
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from src.vocab import get_all_labels
+from src.features import extract_two_hands
 
 mp_hands = mp.solutions.hands
 mp_draw  = mp.solutions.drawing_utils
@@ -30,24 +31,9 @@ os.makedirs(DATA_DIR, exist_ok=True)
 for g in GESTURES:
     os.makedirs(os.path.join(DATA_DIR, g), exist_ok=True)
 
-def extract_two_hands(results):
-    left  = [0.0] * 63
-    right = [0.0] * 63
-    if results.multi_hand_landmarks and results.multi_handedness:
-        for hand_lms, handedness in zip(results.multi_hand_landmarks,
-                                        results.multi_handedness):
-            lbl   = handedness.classification[0].label
-            wrist = hand_lms.landmark[0]
-            feat  = []
-            for lm in hand_lms.landmark:
-                feat += [lm.x - wrist.x, lm.y - wrist.y, lm.z - wrist.z]
-            if lbl == "Left":
-                left = feat
-            else:
-                right = feat
-    return left + right
+# extract_two_hands 改用 src/features（與 train/test 共用，確保特徵格式一致）
 
-# ── 攝影機 
+# ── 攝影機
 cap = cv2.VideoCapture(0)
 if not cap.isOpened():
     for i in range(1, 4):

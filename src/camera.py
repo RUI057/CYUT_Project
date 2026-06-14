@@ -1,17 +1,26 @@
-import mediapipe as mp
-import numpy as np
+"""攝影機端手語辨識：載入 LSTM 模型、即時推理、穩定確認。
+
+架構與 train_model.py 一致（雙向 LSTM + mean/max 池化），
+特徵抽取與尺度正規化共用 src/features，確保訓練/推理一致。
+"""
+import os
+import sys
 import pickle
-import torch
-import torch.nn as nn
 from collections import deque
 
-mp_hands = mp.solutions.hands
-_hands_static  = mp_hands.Hands(static_image_mode=True,  max_num_hands=2,
-                                 min_detection_confidence=0.6)
-_hands_dynamic = mp_hands.Hands(static_image_mode=False, max_num_hands=2,
-                                 min_detection_confidence=0.7)
+import numpy as np
+import torch
+import torch.nn as nn
+import mediapipe as mp
 
-# ── LSTM 模型定義
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from src.features import extract_two_hands, normalize_sequence
+
+mp_hands = mp.solutions.hands
+mp_draw  = mp.solutions.drawing_utils
+
+
+# ── LSTM 模型定義（須與 train_model.py 相同）──────────────
 class GestureLSTM(nn.Module):
     def __init__(self, feat_dim, hidden=128, num_layers=2, num_classes=10, dropout=0.3):
         super().__init__()
@@ -19,16 +28,17 @@ class GestureLSTM(nn.Module):
                             batch_first=True, dropout=dropout, bidirectional=True)
         self.dropout = nn.Dropout(dropout)
         self.fc = nn.Sequential(
-            nn.Linear(hidden * 2, 64),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(64, num_classes)
+            nn.Linear(hidden * 4, 64), nn.ReLU(),
+            nn.Dropout(dropout), nn.Linear(64, num_classes)
         )
+
     def forward(self, x):
         out, _ = self.lstm(x)
-        return self.fc(self.dropout(out[:, -1, :]))
+        feat = torch.cat([out.mean(1), out.max(1).values], dim=1)
+        return self.fc(self.dropout(feat))
 
-# ── 推理裝置
+
+# ── 推理裝置 ──────────────────────────────────
 if torch.backends.mps.is_available():
     _device = torch.device("mps")
 elif torch.cuda.is_available():
@@ -36,87 +46,139 @@ elif torch.cuda.is_available():
 else:
     _device = torch.device("cpu")
 
-# ── 載入模型
-_model = _classes = _seq_len = None
+# ── 載入模型 ──────────────────────────────────
+_model = None
+_classes = []
+_seq_len = 30
 
 try:
     with open("data/model.pkl", "rb") as f:
-        payload = pickle.load(f)
-
-    _classes  = payload["classes"]
-    _seq_len  = payload["seq_len"]
-    _feat_dim = payload["feat_dim"]
-
-    net = GestureLSTM(
-        feat_dim=_feat_dim,
-        hidden=payload.get("hidden", 128),
-        num_layers=payload.get("num_layers", 2),
-        num_classes=len(_classes)
+        _payload = pickle.load(f)
+    _classes = _payload["classes"]
+    _seq_len = _payload["seq_len"]
+    _net = GestureLSTM(
+        feat_dim=_payload["feat_dim"],
+        hidden=_payload.get("hidden", 128),
+        num_layers=_payload.get("num_layers", 2),
+        num_classes=len(_classes),
     )
-    net.load_state_dict(payload["model_state"])
-    net.to(_device)
-    net.eval()
-    _model = net
+    _net.load_state_dict(_payload["model_state"])
+    _net.to(_device)
+    _net.eval()
+    _model = _net
     print(f"[模型] 載入成功  裝置：{_device}  詞彙：{_classes}")
-
 except FileNotFoundError:
     print("[警告] 找不到 data/model.pkl，請先執行 train_model.py")
 
-# ── 滑動窗口緩衝區 ────────────────────────────
-_buffer = deque(maxlen=_seq_len if _seq_len else 30)
 
-# ── 特徵擷取 ──────────────────────────────────
-def _extract_two_hands(results):
-    left  = [0.0] * 63
-    right = [0.0] * 63
-    if results.multi_hand_landmarks and results.multi_handedness:
-        for hand_lms, handedness in zip(results.multi_hand_landmarks,
-                                        results.multi_handedness):
-            lbl   = handedness.classification[0].label
-            wrist = hand_lms.landmark[0]
-            feat  = []
-            for lm in hand_lms.landmark:
-                feat += [lm.x - wrist.x, lm.y - wrist.y, lm.z - wrist.z]
-            if lbl == "Left":  left  = feat
-            else:              right = feat
-    return left + right
+def is_ready() -> bool:
+    return _model is not None
 
-# ── 公開 API ──────────────────────────────────
-def has_hand_from_array(frame_rgb: np.ndarray) -> bool:
-    result = _hands_static.process(frame_rgb)
-    return result.multi_hand_landmarks is not None
 
-def recognize_local_from_array(frame_rgb: np.ndarray) -> str:
+def get_classes() -> list:
+    return list(_classes)
+
+
+def draw_landmarks(frame_bgr, results):
+    """在 BGR 影格上畫出手部骨架。"""
+    if results and results.multi_hand_landmarks:
+        for lm in results.multi_hand_landmarks:
+            mp_draw.draw_landmarks(frame_bgr, lm, mp_hands.HAND_CONNECTIONS)
+    return frame_bgr
+
+
+# ── 有狀態的即時辨識器 ──────────────────────────
+class SignRecognizer:
+    """逐幀餵入 RGB 影格，內部維護滑動視窗 + 穩定確認 + 冷卻。
+
+    process() 回傳當前狀態；當某個詞連續穩定出現時，
+    state["confirmed"] 會是該詞（否則為 None）。
     """
-    輸入 RGB numpy array，回傳辨識詞彙。
-    信心不足或幀數未累積回傳空字串。
-    """
-    global _buffer
-    if _model is None:
-        return "？"
-    try:
-        results = _hands_dynamic.process(frame_rgb)
-        _buffer.append(_extract_two_hands(results))
 
-        if len(_buffer) < _seq_len:
-            return ""
+    def __init__(self, conf_thresh=0.80, confirm_frames=15, cooldown_frames=30,
+                 no_hand_clear=10, motion_thresh=0.005):
+        self.hands = mp_hands.Hands(static_image_mode=False, max_num_hands=2,
+                                    min_detection_confidence=0.7,
+                                    min_tracking_confidence=0.5)
+        self.seq_len         = _seq_len
+        self.conf_thresh     = conf_thresh
+        self.confirm_frames  = confirm_frames
+        self.cooldown_frames = cooldown_frames
+        self.no_hand_clear   = no_hand_clear
+        self.motion_thresh   = motion_thresh
 
-        x = torch.tensor(np.array(_buffer), dtype=torch.float32)
-        x = x.unsqueeze(0).to(_device)          # (1, 30, 126)
+        self.buffer        = deque(maxlen=self.seq_len)
+        self.confirm_word  = ""
+        self.confirm_count = 0
+        self.cooldown      = 0
+        self.no_hand       = 0
+        self.idle_frames   = 0   # 連續沒有手的幀數（給上層判斷句子結束）
 
-        with torch.no_grad():
-            logits = _model(x)
-            proba  = torch.softmax(logits, dim=1)[0]
-            conf, idx = proba.max(0)
+    def reset(self):
+        self.buffer.clear()
+        self.confirm_word  = ""
+        self.confirm_count = 0
+        self.cooldown      = 0
 
-        if conf.item() >= 0.75:
-            return _classes[idx.item()]
-        return ""
+    def process(self, frame_rgb):
+        results  = self.hands.process(frame_rgb)
+        has_hand = results.multi_hand_landmarks is not None
 
-    except Exception as e:
-        print(f"[辨識錯誤] {e}")
-        return ""
+        if has_hand:
+            self.no_hand = 0
+            self.idle_frames = 0
+            self.buffer.append(extract_two_hands(results))
+        else:
+            self.no_hand += 1
+            self.idle_frames += 1
+            if self.no_hand >= self.no_hand_clear:
+                self.buffer.clear()
+                self.confirm_word  = ""
+                self.confirm_count = 0
 
-def reset_buffer():
-    global _buffer
-    _buffer.clear()
+        raw_word, raw_conf, motion = "", 0.0, 0.0
+        if self.cooldown > 0:
+            self.cooldown -= 1
+        elif _model is not None and has_hand and len(self.buffer) == self.seq_len:
+            arr    = np.array(self.buffer)
+            motion = float(np.std(arr, axis=0).mean())
+            if motion >= self.motion_thresh:
+                x = torch.tensor(normalize_sequence(arr),
+                                 dtype=torch.float32).unsqueeze(0).to(_device)
+                with torch.no_grad():
+                    proba = torch.softmax(_model(x), dim=1)[0]
+                conf, idx = proba.max(0)
+                if conf.item() >= self.conf_thresh:
+                    raw_word, raw_conf = _classes[idx.item()], conf.item()
+
+        # 穩定確認
+        if raw_word:
+            if raw_word == self.confirm_word:
+                self.confirm_count += 1
+            else:
+                self.confirm_word, self.confirm_count = raw_word, 1
+        else:
+            self.confirm_word, self.confirm_count = "", 0
+
+        confirmed, confirmed_conf = None, 0.0
+        if self.confirm_count >= self.confirm_frames:
+            confirmed, confirmed_conf = self.confirm_word, raw_conf
+            self.confirm_word, self.confirm_count = "", 0
+            self.cooldown = self.cooldown_frames
+            self.buffer.clear()
+
+        return {
+            "results":        results,
+            "has_hand":       has_hand,
+            "hand_n":         len(results.multi_hand_landmarks) if has_hand else 0,
+            "raw_word":       raw_word,
+            "raw_conf":       raw_conf,
+            "motion":         motion,
+            "buffer_pct":     int(len(self.buffer) / self.seq_len * 100),
+            "confirm_word":   self.confirm_word,
+            "confirm_pct":    int(self.confirm_count / self.confirm_frames * 100),
+            "cooldown":       self.cooldown,
+            "confirmed":      confirmed,
+            "confirmed_conf": confirmed_conf,
+            "idle_frames":    self.idle_frames,
+        }
