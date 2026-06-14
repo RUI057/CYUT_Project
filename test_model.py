@@ -3,19 +3,52 @@ import mediapipe as mp
 import numpy as np
 import pickle
 import sys
+import torch
+import torch.nn as nn
 from collections import deque
 from PIL import Image, ImageDraw, ImageFont
+
+sys.path.insert(0, __import__('os').path.dirname(__import__('os').path.abspath(__file__)))
+from src.font_utils import get_font, put_text
+
+# ── LSTM 定義（與 train_model.py 一致）────────
+class GestureLSTM(nn.Module):
+    def __init__(self, feat_dim, hidden=128, num_layers=2, num_classes=10, dropout=0.3):
+        super().__init__()
+        self.lstm = nn.LSTM(feat_dim, hidden, num_layers,
+                            batch_first=True, dropout=dropout, bidirectional=True)
+        self.dropout = nn.Dropout(dropout)
+        self.fc = nn.Sequential(
+            nn.Linear(hidden * 2, 64), nn.ReLU(),
+            nn.Dropout(dropout), nn.Linear(64, num_classes)
+        )
+    def forward(self, x):
+        out, _ = self.lstm(x)
+        return self.fc(self.dropout(out[:, -1, :]))
 
 # ── 載入模型 ──────────────────────────────────
 try:
     with open("data/model.pkl", "rb") as f:
         payload = pickle.load(f)
-    model   = payload["model"]
-    labels  = payload["labels"]
-    seq_len = payload["seq_len"]
-    print(f"[OK] 模型載入，詞彙：{labels}")
+    classes   = payload["classes"]
+    seq_len   = payload["seq_len"]
+    feat_dim  = payload["feat_dim"]
+
+    if torch.backends.mps.is_available():
+        device = torch.device("mps")
+    elif torch.cuda.is_available():
+        device = torch.device("cuda")
+    else:
+        device = torch.device("cpu")
+
+    model = GestureLSTM(feat_dim=feat_dim, num_classes=len(classes))
+    model.load_state_dict(payload["model_state"])
+    model.to(device)
+    model.eval()
+    print(f"[OK] 模型載入  裝置：{device}")
+    print(f"[OK] 詞彙：{classes}")
 except FileNotFoundError:
-    print("[錯誤] 找不到 data/model.pkl，請先執行 train_model.py")
+    print("[錯誤] 找不到 data/model.pkl")
     sys.exit(1)
 
 # ── MediaPipe ─────────────────────────────────
@@ -24,37 +57,9 @@ mp_draw  = mp.solutions.drawing_utils
 hands    = mp_hands.Hands(static_image_mode=False, max_num_hands=2,
                           min_detection_confidence=0.7)
 
-# ── 字型 ──────────────────────────────────────
-mac_font_paths = [
-    "/System/Library/Fonts/STHeiti Light.ttc",
-    "/System/Library/Fonts/PingFang.ttc",
-    "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
-    "/Library/Fonts/Arial Unicode.ttf",
-    "/System/Library/Fonts/Supplemental/Songti.ttc",
-    "/System/Library/Fonts/Hiragino Sans GB.ttc"
-]
-
-font_large = font_medium = font_small = None
-for path in mac_font_paths:
-    try:
-        font_large  = ImageFont.truetype(path, 44)
-        font_medium = ImageFont.truetype(path, 28)
-        font_small  = ImageFont.truetype(path, 20)
-        print(f"[OK] 成功載入中文字型：{path}")
-        break
-    except Exception:
-        continue
-
-
-if font_large is None:
-    print("[警告] 找不到支援中文的字型，畫面可能會報錯！")
-    font_large = font_medium = font_small = ImageFont.load_default()
-
-def put_text(frame, text, pos, font, color=(255, 255, 255)):
-    img_pil = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-    draw    = ImageDraw.Draw(img_pil)
-    draw.text(pos, text, font=font, fill=color)
-    return cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
+font_large  = get_font(44)
+font_medium = get_font(28)
+font_small  = get_font(20)
 
 # ── 特徵擷取 ──────────────────────────────────
 def extract_two_hands(results):
@@ -68,19 +73,18 @@ def extract_two_hands(results):
             feat  = []
             for lm in hand_lms.landmark:
                 feat += [lm.x - wrist.x, lm.y - wrist.y, lm.z - wrist.z]
-            if lbl == "Left":
-                left = feat
-            else:
-                right = feat
+            if lbl == "Left":  left  = feat
+            else:              right = feat
     return left + right
 
-# ── 參數設定 ──────────────────────────────────
-CONF_THRESH    = 0.75   # 信心度門檻
-CONFIRM_FRAMES = 20     # 同一詞連續出現幾幀才確認
-COOLDOWN_FRAMES = 30    # 確認後冷卻幾幀，防止重複
+# ── 參數 ──────────────────────────────────────
+CONF_THRESH     = 0.80   # 提高門檻，減少誤判
+CONFIRM_FRAMES  = 20
+COOLDOWN_FRAMES = 40     # 確認後冷卻更長
+NO_HAND_CLEAR   = 10     # 手消失幾幀後清空 buffer
 
-# ── 狀態變數 ──────────────────────────────────
-cap           = cv2.VideoCapture(0)
+# ── 開啟攝影機 ────────────────────────────────
+cap = cv2.VideoCapture(0)
 if not cap.isOpened():
     for i in range(1, 4):
         cap = cv2.VideoCapture(i)
@@ -88,14 +92,15 @@ if not cap.isOpened():
             break
 
 buffer         = deque(maxlen=seq_len)
-confirm_word   = ""      # 目前累積中的候選詞
-confirm_count  = 0       # 候選詞連續出現幾幀
-cooldown       = 0       # 冷卻計數
-confirmed_word = ""      # 已確認的詞
+confirm_word   = ""
+confirm_count  = 0
+cooldown       = 0
+confirmed_word = ""
 confirmed_conf = 0.0
 result_history = deque(maxlen=6)
+no_hand_count  = 0    # 連續無手幀數
 
-print("\n[操作說明]  C=清除  Q=離開\n")
+print("\n[操作]  C=清除  Q=離開\n")
 
 while True:
     ret, frame = cap.read()
@@ -107,43 +112,57 @@ while True:
     results = hands.process(rgb)
     h, w, _ = frame.shape
 
-    # 畫手部骨架
-    if results.multi_hand_landmarks:
-        for hand_lms in results.multi_hand_landmarks:
-            mp_draw.draw_landmarks(frame, hand_lms, mp_hands.HAND_CONNECTIONS)
+    hand_detected = results.multi_hand_landmarks is not None
 
-    # 累積特徵
-    buffer.append(extract_two_hands(results))
+    if hand_detected:
+        for lm in results.multi_hand_landmarks:
+            mp_draw.draw_landmarks(frame, lm, mp_hands.HAND_CONNECTIONS)
+        no_hand_count = 0
+        buffer.append(extract_two_hands(results))
+    else:
+        no_hand_count += 1
+        # 手消失超過 NO_HAND_CLEAR 幀 → 清空 buffer 和候選詞
+        if no_hand_count >= NO_HAND_CLEAR:
+            buffer.clear()
+            confirm_word  = ""
+            confirm_count = 0
 
-    # 冷卻中不做預測
+    # ── PyTorch 推理 ──────────────────────────
+    raw_pred, raw_conf = "", 0.0
     if cooldown > 0:
         cooldown -= 1
-        raw_pred = ""
-        raw_conf = 0.0
-    elif len(buffer) == seq_len:
-        X        = np.array(buffer).flatten().reshape(1, -1)
-        proba    = model.predict_proba(X)[0]
-        idx      = proba.argmax()
-        raw_conf = proba[idx]
-        raw_pred = model.classes_[idx] if raw_conf >= CONF_THRESH else ""
-    else:
-        raw_pred = ""
-        raw_conf = 0.0
+    elif hand_detected and len(buffer) == seq_len:
+        
+        # [新增] 檢查 30 幀內的特徵變化量
+        # 計算所有特徵在時間軸上的標準差的平均值
+        motion_variance = np.std(np.array(buffer), axis=0).mean()
+        MOTION_THRESH = 0.005  # 這個門檻值需要你實測微調 (通常在 0.002 ~ 0.01 之間)
 
+        if motion_variance < MOTION_THRESH:
+            # 變化量太小，代表手是靜止的，跳過預測
+            pass 
+        else:
+            # 原本的預測邏輯
+            x = torch.tensor(np.array(buffer), dtype=torch.float32)
+            x = x.unsqueeze(0).to(device)
+            with torch.no_grad():
+                proba = torch.softmax(model(x), dim=1)[0]
+            conf, idx = proba.max(0)
+            if conf.item() >= CONF_THRESH:
+                raw_pred = classes[idx.item()]
+                raw_conf = conf.item()
+                
     # ── 穩定確認邏輯 ──────────────────────────
     if raw_pred:
         if raw_pred == confirm_word:
             confirm_count += 1
         else:
-            # 換詞了，重新從 1 開始累積
             confirm_word  = raw_pred
             confirm_count = 1
     else:
-        # 沒偵測到就重置候選
         confirm_word  = ""
         confirm_count = 0
 
-    # 累積夠了 → 確認
     if confirm_count >= CONFIRM_FRAMES:
         confirmed_word = confirm_word
         confirmed_conf = raw_conf
@@ -152,60 +171,54 @@ while True:
         confirm_word  = ""
         confirm_count = 0
         cooldown      = COOLDOWN_FRAMES
+        buffer.clear()   # ← 關鍵：清空舊幀，避免殘留誤判
 
-    # ── 畫面顯示 ──────────────────────────────
-    hand_count = len(results.multi_hand_landmarks) if results.multi_hand_landmarks else 0
-    buf_pct    = int(len(buffer) / seq_len * 100)
+    # ── 畫面 ──────────────────────────────────
+    buf_pct = int(len(buffer) / seq_len * 100)
 
-    # Buffer 進度條（底部）
-    cv2.rectangle(frame, (10, h - 28), (w - 10, h - 10), (40, 40, 40), -1)
-    fill_w = int((w - 20) * buf_pct / 100)
-    bar_color = (0, 180, 80) if buf_pct == 100 else (0, 100, 200)
-    cv2.rectangle(frame, (10, h - 28), (10 + fill_w, h - 10), bar_color, -1)
-    cv2.putText(frame, f"Buffer {buf_pct}%", (15, h - 12),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
+    # Buffer 進度條
+    cv2.rectangle(frame, (10, h-28), (w-10, h-10), (40,40,40), -1)
+    bw = int((w-20) * buf_pct / 100)
+    cv2.rectangle(frame, (10, h-28), (10+bw, h-10),
+                  (0,180,80) if buf_pct==100 else (0,100,200), -1)
+    cv2.putText(frame, f"Buffer {buf_pct}%", (15, h-12),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255,255,255), 1)
 
-    # 確認進度條（中間偏下）
+    # 確認進度條
     if confirm_word:
-        prog_pct = int(confirm_count / CONFIRM_FRAMES * 100)
-        cv2.rectangle(frame, (10, h - 52), (w - 10, h - 34), (40, 40, 40), -1)
-        prog_w = int((w - 20) * prog_pct / 100)
-        cv2.rectangle(frame, (10, h - 52), (10 + prog_w, h - 34), (0, 220, 180), -1)
-        frame = put_text(frame, f"確認中：{confirm_word}  {prog_pct}%",
-                         (15, h - 53), font_small, (0, 220, 180))
+        prog = int(confirm_count / CONFIRM_FRAMES * 100)
+        cv2.rectangle(frame, (10, h-52), (w-10, h-34), (40,40,40), -1)
+        pw = int((w-20) * prog / 100)
+        cv2.rectangle(frame, (10, h-52), (10+pw, h-34), (0,200,160), -1)
+        frame = put_text(frame, f"確認中：{confirm_word} {prog}%",
+                         (15, h-56), font_small, (0,220,180))
 
-    # 冷卻提示
     if cooldown > 0:
-        frame = put_text(frame, f"冷卻中 {cooldown}", (10, h - 80),
-                         font_small, (180, 180, 80))
+        frame = put_text(frame, f"冷卻 {cooldown}",
+                         (10, h-78), font_small, (180,180,80))
 
-    # 有手 / 無手
-    hc = (0, 220, 80) if hand_count > 0 else (80, 80, 200)
-    cv2.putText(frame, f"Hand: {hand_count}", (10, 32),
+    hc     = (0,220,80) if hand_detected else (80,80,200)
+    hand_n = len(results.multi_hand_landmarks) if hand_detected else 0
+    cv2.putText(frame, f"Hand:{hand_n}", (10,32),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, hc, 2)
 
-    # 已確認詞彙（大字）
     if confirmed_word:
-        frame = put_text(frame, confirmed_word, (10, 48),  font_large,  (0, 220, 80))
-        frame = put_text(frame, f"{confirmed_conf:.0%}",   (10, 100), font_small, (160, 255, 160))
+        frame = put_text(frame, confirmed_word,         (10,48),  font_large,  (0,220,80))
+        frame = put_text(frame, f"{confirmed_conf:.0%}", (10,100), font_small, (160,255,160))
     else:
-        frame = put_text(frame, "比手語等待辨識...", (10, 48), font_medium, (130, 130, 130))
+        frame = put_text(frame, "比手語等待辨識...", (10,48), font_medium, (130,130,130))
 
-    # 右側辨識紀錄
-    frame = put_text(frame, "辨識紀錄", (w - 190, 10), font_small, (180, 180, 180))
+    frame = put_text(frame, "辨識紀錄", (w-190,10), font_small, (180,180,180))
     for i, (word, conf) in enumerate(reversed(result_history)):
-        brightness = max(80, 240 - i * 35)
-        c = (brightness, brightness, brightness)
+        b = max(80, 240 - i*35)
         frame = put_text(frame, f"{word}  {conf:.0%}",
-                         (w - 190, 36 + i * 30), font_small, c)
+                         (w-190, 36+i*30), font_small, (b,b,b))
 
-    # 操作說明
-    cv2.putText(frame, "C=clear  Q=quit", (10, h - 60),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (100, 100, 100), 1)
+    cv2.putText(frame, "C=clear  Q=quit", (10, h-60),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (100,100,100), 1)
 
-    cv2.imshow("手語模型測試", frame)
+    cv2.imshow("手語模型測試 (LSTM)", frame)
     key = cv2.waitKey(1) & 0xFF
-
     if key == ord('q'):
         break
     elif key == ord('c'):
@@ -214,7 +227,7 @@ while True:
         confirm_word   = ""
         confirm_count  = 0
         buffer.clear()
-        print("[清除] 紀錄已清除")
+        print("[清除]")
 
 cap.release()
 cv2.destroyAllWindows()
