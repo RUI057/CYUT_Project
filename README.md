@@ -18,7 +18,7 @@
 
 ```
 CYUT_MDFK/
-├── app.py                    網頁即時翻譯（Streamlit，推薦入口）
+├── app.py                    網頁即時翻譯
 ├── collect_data.py           收集訓練資料
 ├── train_model.py            LSTM 模型訓練
 ├── test_model.py             實時識別測試
@@ -184,7 +184,6 @@ vocabulary.json 定義所有可識別的詞彙，修改后需重新收集數據�
 ## 更新紀錄
 
 2026.6.14 - 引入深度學習，採用 PyTorch + Bi-LSTM 
-2026.6.15 - 接入網頁
 2026.6.15 - 尺度正規化 + 資料增強 + 類別權重 + mean/max 池化，降低手勢誤判
 
 ## 未來計劃

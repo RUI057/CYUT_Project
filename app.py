@@ -1,10 +1,3 @@
-"""台灣手語即時辨識 → Gemini 語義翻譯網頁。
-
-流程：攝影機 → LSTM 辨識手語詞 → 累積詞彙序列 →
-      Gemini 轉成自然中文句子 → gTTS 朗讀。
-
-執行：streamlit run app.py
-"""
 import os
 import sys
 import json
@@ -24,7 +17,7 @@ RECORDS_PATH = "history/records.json"
 st.set_page_config(page_title="手語即時翻譯", layout="wide")
 
 
-# ── 歷史紀錄 ──────────────────────────────────
+# 歷史紀錄
 def load_history():
     if not os.path.exists(RECORDS_PATH):
         return []
@@ -46,7 +39,7 @@ def append_history(record):
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
-# ── 初始化 session 狀態 ───────────────────────
+# 初始化 session 狀態
 def init_state():
     ss = st.session_state
     ss.setdefault("words", [])
@@ -63,7 +56,7 @@ init_state()
 ss = st.session_state
 
 
-# ── 翻譯：詞彙序列 → 句子 → 語音 ───────────────
+# 翻譯：詞彙序列 → 句子 → 語音
 def translate_words():
     words = list(ss.words)
     if not words:
@@ -83,7 +76,7 @@ def translate_words():
     ss.recognizer.reset()
 
 
-# ── 側邊欄設定 ────────────────────────────────
+# 側邊欄設定
 st.sidebar.title("設定")
 rec = ss.recognizer
 rec.conf_thresh    = st.sidebar.slider("信心門檻", 0.5, 0.95, rec.conf_thresh, 0.05,
@@ -91,13 +84,13 @@ rec.conf_thresh    = st.sidebar.slider("信心門檻", 0.5, 0.95, rec.conf_thres
 rec.confirm_frames = st.sidebar.slider("連續確認幀數", 5, 30, rec.confirm_frames, 1,
                                         help="同一個詞連續幾幀才算數，越高越穩")
 idle_to_translate  = st.sidebar.slider("自動翻譯停頓（幀）", 10, 60, 25, 5,
-                                        help="手離開畫面這麼多幀後，自動把累積詞彙翻成句子")
+                                        help="手離開畫面幾幀後，自動把累積詞彙翻成句子")
 st.sidebar.divider()
 st.sidebar.caption("詞彙庫（" + str(len(camera.get_classes())) + " 個）")
 st.sidebar.write("、".join(camera.get_classes()) or "（模型未載入）")
 
 
-# ── 標題 ──────────────────────────────────────
+# 標題
 st.title("手語翻譯")
 st.caption("MediaPipe + LSTM 辨識手語詞彙，Gemini 語義轉換成自然中文，gTTS 朗讀。")
 
@@ -118,7 +111,7 @@ sentence_ph = right.empty()
 audio_ph    = right.empty()
 
 
-# ── 控制按鈕（在攝影機迴圈之前處理，確保執行時也能點擊）──
+# 控制按鈕
 if btn_cols[0].button("翻譯", width="stretch", disabled=not ss.words):
     translate_words()
 if btn_cols[1].button("朗讀", width="stretch", disabled=not ss.sentence):
@@ -131,7 +124,7 @@ if btn_cols[2].button("清除", width="stretch"):
     ss.recognizer.reset()
 
 
-# ── 渲染目前詞彙 / 句子 / 音訊 ──────────────────
+# 渲染詞彙 句子 音訊
 def render_words():
     if ss.words:
         words_ph.markdown(
@@ -141,19 +134,19 @@ def render_words():
             unsafe_allow_html=True,
         )
     else:
-        words_ph.markdown("_尚未辨識到詞彙，請對著鏡頭比手語_")
+        words_ph.markdown("_未辨識到詞彙 請對著鏡頭比手語_")
 
 
 render_words()
 sentence_ph.markdown(f"### {ss.sentence}" if ss.sentence else "_（翻譯結果會顯示在這裡）_")
 
-# 音訊：只有剛翻譯/剛朗讀時自動播放一次
+# 音訊
 if ss.audio_bytes:
     audio_ph.audio(ss.audio_bytes, format="audio/mp3", autoplay=ss.play_audio)
 ss.play_audio = False
 
 
-# ── 攝影機開關 ────────────────────────────────
+# 攝影機開關
 run = right.checkbox("啟動攝影機", value=False)
 
 if run and ss.cap is None:
@@ -170,9 +163,9 @@ if not run and ss.cap is not None:
     frame_ph.info("攝影機已關閉。勾選「啟動攝影機」開始辨識。")
 
 if not run and ss.cap is None and not ss.sentence:
-    frame_ph.info("勾選右側「啟動攝影機」開始辨識。比完一段手語後，手離開畫面即自動翻譯。")
+    frame_ph.info("勾選「啟動攝影機」開始辨識。比完一段手語後，手離開畫面即自動翻譯。")
 
-# ── 歷史紀錄 ──────────────────────────────────
+#  歷史紀錄 
 with st.expander(f"翻譯紀錄（{len(ss.history)} 筆）", expanded=False):
     if ss.history:
         for r in ss.history[:20]:
@@ -180,9 +173,7 @@ with st.expander(f"翻譯紀錄（{len(ss.history)} 筆）", expanded=False):
     else:
         st.caption("尚無紀錄")
 
-# ── 即時辨識迴圈（單一連續迴圈，只更新 placeholder，不重跑整頁 → 不閃爍）──
-# 取消勾選或點按鈕時，下一次 .image() 會被 Streamlit 中斷並自動重跑腳本，
-# 因此迴圈內不需（也不可）呼叫 st.rerun()。
+# 即時辨識迴圈
 if run and ss.cap is not None:
     cap = ss.cap
     while True:

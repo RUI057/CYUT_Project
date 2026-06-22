@@ -68,7 +68,7 @@ font_small  = get_font(20)
 # ── 參數 ──────────────────────────────────────
 CONF_THRESH     = 0.80   # 信心度門檻
 CONFIRM_FRAMES  = 20     # 同一詞連續幾幀才確認
-COOLDOWN_FRAMES = 40     # 確認後冷卻幾幀
+COOLDOWN_FRAMES = 20     # 確認後冷卻幾幀
 NO_HAND_CLEAR   = 10     # 手消失幾幀後清空 buffer
 MOTION_THRESH   = 0.005  # 動作門檻，調高=更難觸發，調低=更容易觸發
 
