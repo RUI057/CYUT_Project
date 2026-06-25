@@ -10,35 +10,17 @@ from collections import deque
 
 import numpy as np
 import torch
-import torch.nn as nn
 import mediapipe as mp
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.features import extract_two_hands, normalize_sequence
+from src.model import GestureLSTM
 
 mp_hands = mp.solutions.hands
 mp_draw  = mp.solutions.drawing_utils
 
 
-# ── LSTM 模型定義（須與 train_model.py 相同）──────────────
-class GestureLSTM(nn.Module):
-    def __init__(self, feat_dim, hidden=128, num_layers=2, num_classes=10, dropout=0.3):
-        super().__init__()
-        self.lstm = nn.LSTM(feat_dim, hidden, num_layers,
-                            batch_first=True, dropout=dropout, bidirectional=True)
-        self.dropout = nn.Dropout(dropout)
-        self.fc = nn.Sequential(
-            nn.Linear(hidden * 4, 64), nn.ReLU(),
-            nn.Dropout(dropout), nn.Linear(64, num_classes)
-        )
-
-    def forward(self, x):
-        out, _ = self.lstm(x)
-        feat = torch.cat([out.mean(1), out.max(1).values], dim=1)
-        return self.fc(self.dropout(feat))
-
-
-# ── 推理裝置 ──────────────────────────────────
+# ── 推理裝置（LSTM 定義集中於 src/model.py）──────────────
 if torch.backends.mps.is_available():
     _device = torch.device("mps")
 elif torch.cuda.is_available():

@@ -3,10 +3,10 @@ import mediapipe as mp
 import numpy as np
 import os
 import sys
-from PIL import Image, ImageDraw, ImageFont  # noqa
+from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from src.vocab import get_all_labels
+from src.vocab import get_all_labels, get_hint
 from src.features import extract_two_hands
 
 mp_hands = mp.solutions.hands
@@ -19,13 +19,17 @@ font_large  = get_font(50)
 font_medium = get_font(40)
 font_small  = get_font(40)
 
-# ── 設定 
+# ── 設定
 GESTURES         = get_all_labels()
 SEQUENCE_LENGTH  = 30   # 每筆幾幀
-SAMPLES_PER_CLASS = 100  # 每個詞彙幾筆
-HOLD_FRAMES      = 15   # 手穩定幾幀後自動開始錄製
-COOLDOWN_FRAMES  = 5   # 每筆錄完後冷卻幾幀
+SAMPLES_PER_CLASS = 200  # 每個詞彙幾筆
+HOLD_FRAMES      = 15   # 手穩定幾幀後進入倒數
+COUNTDOWN_FRAMES = 36   # 倒數總幀數
+COOLDOWN_FRAMES  = 20   # 每筆錄完後冷卻幾幀
 DATA_DIR         = "dynamic_dataset"
+
+# 本次收集的 session 標記，寫進檔名 → 訓練時可做「同次錄製不跨組」的誠實切分
+SESSION = datetime.now().strftime("%Y%m%d_%H%M%S")
 
 os.makedirs(DATA_DIR, exist_ok=True)
 for g in GESTURES:
@@ -42,18 +46,15 @@ if not cap.isOpened():
             break
 
 # ── 狀態 
-current_gesture = 0
-state           = "waiting"   # waiting → holding → recording → cooldown
+current_gesture = 25
+state           = "waiting"   # waiting → countdown → recording → cooldown
 sequence        = []
 hold_count      = 0
+countdown_count = 0
 cooldown_count  = 0
 paused          = False
+print(f"[Session] {SESSION}")
 
-print("[詞彙清單]")
-for i, g in enumerate(GESTURES):
-    existing = len(os.listdir(os.path.join(DATA_DIR, g)))
-    status   = "OK" if existing >= SAMPLES_PER_CLASS else f"{existing}/{SAMPLES_PER_CLASS}"
-    print(f"  {i:2d} = {g:6s}  [{status}]")
 print("\nN=下一個  M=上一個  R=重置此詞彙  D=刪除上一個  S=暫停/繼續偵測  Q=離開")
 print("按 S 可暫停偵測避免誤觸，按 D 可刪除上一筆已儲存資料\n")
 
@@ -61,7 +62,6 @@ while cap.isOpened():
     ret, frame = cap.read()
     if not ret:
         break
-
     frame   = cv2.flip(frame, 1)
     rgb     = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     results = hands.process(rgb)
@@ -87,19 +87,30 @@ while cap.isOpened():
         if has_hand:
             hold_count += 1
             if hold_count >= HOLD_FRAMES:
-                state      = "recording"
-                sequence   = []
-                hold_count = 0
-                print(f"[錄製] {label}  第 {existing + 1} 筆")
+                state           = "countdown"
+                countdown_count = COUNTDOWN_FRAMES
+                hold_count      = 0
         else:
             hold_count = 0
+
+    elif state == "countdown":
+        # 倒數期間手必須在；手不見就退回等待
+        if not has_hand:
+            state = "waiting"
+            hold_count = 0
+        else:
+            countdown_count -= 1
+            if countdown_count <= 0:
+                state    = "recording"
+                sequence = []
+                print(f"[錄製] {label}  第 {existing + 1} 筆")
 
     elif state == "recording":
         feat = extract_two_hands(results)
         sequence.append(feat)
         if len(sequence) == SEQUENCE_LENGTH:
             arr       = np.array(sequence)
-            save_path = os.path.join(DATA_DIR, label, f"{existing}.npy")
+            save_path = os.path.join(DATA_DIR, label, f"{SESSION}_{existing}.npy")
             np.save(save_path, arr)
             existing += 1
             print(f"[儲存] {label}  {existing}/{SAMPLES_PER_CLASS}")
@@ -125,32 +136,33 @@ while cap.isOpened():
     # 狀態
     state_info = {
         "waiting":   (f"等待手部出現... ({hold_count}/{HOLD_FRAMES})", (150, 150, 150)),
+        "countdown": ("準備...比出手勢！",                            (0, 200, 255)),
         "recording": (f"錄製中  {len(sequence)}/{SEQUENCE_LENGTH} 幀",  (0, 220, 80)),
-        "cooldown":  (f"冷卻中  {cooldown_count}",                      (0, 160, 255)),
+        "cooldown":  (f"冷卻中  {cooldown_count}  ← 換個距離/角度再比一次", (0, 160, 255)),
         "done":      ("此詞彙已完成！按 N 換下一個",                     (0, 220, 80)),
         "paused":    ("暫停偵測，按 S 繼續",                         (220, 180, 0)),
     }
     frame = put_text(frame, state_info["paused"][0] if paused else state_info[state][0],
                      (10, 95), font_medium, state_info["paused"][1] if paused else state_info[state][1])
 
+    # 倒數大數字 3-2-1（置中）
+    if state == "countdown":
+        num = countdown_count // (COUNTDOWN_FRAMES // 3) + 1
+        cv2.putText(frame, str(num), (w // 2 - 30, h // 2),
+                    cv2.FONT_HERSHEY_SIMPLEX, 4.0, (0, 200, 255), 8)
+
     # 有無偵測到手
     hand_text  = f"偵測到 {len(results.multi_hand_landmarks)} 隻手" if has_hand else "未偵測到手"
     hand_color = (100, 220, 255) if has_hand else (80, 80, 200)
     frame = put_text(frame, hand_text, (10, 130), font_small, hand_color)
 
-    # 進度條
-    bar_w = w - 20
-    cv2.rectangle(frame, (10, h - 25), (10 + bar_w, h - 8), (50, 50, 50), -1)
-    filled = int(bar_w * min(existing, SAMPLES_PER_CLASS) / SAMPLES_PER_CLASS)
-    cv2.rectangle(frame, (10, h - 25), (10 + filled, h - 8), (0, 180, 80), -1)
+    # 手語提示
+    hint_text = get_hint(label)
+    frame = put_text(frame, f"提示：{hint_text}", (10, 180), font_large, (0, 0, 220))
 
     # 操作提示
     frame = put_text(frame, "N=下一個  M=上一個  R=重置  D=刪除上一個  S=暫停/繼續  Q=離開",
                      (10, h - 90), font_small, (120, 120, 120))
-
-    # 錄製中閃爍紅點
-    if state == "recording":
-        cv2.circle(frame, (w - 30, 25), 10, (0, 0, 220), -1)
 
     cv2.imshow("手語資料收集", frame)
     key = cv2.waitKey(1) & 0xFF
@@ -186,7 +198,8 @@ while cap.isOpened():
         folder = os.path.join(DATA_DIR, label)
         samples = [f for f in os.listdir(folder) if f.endswith('.npy')]
         if samples:
-            samples.sort(key=lambda x: int(os.path.splitext(x)[0]))
+            # 依檔案修改時間排序（檔名含 session 前綴，不能用數字解析）
+            samples.sort(key=lambda x: os.path.getmtime(os.path.join(folder, x)))
             last_file = samples[-1]
             os.remove(os.path.join(folder, last_file))
             state = "waiting"
@@ -207,19 +220,3 @@ while cap.isOpened():
 
 cap.release()
 cv2.destroyAllWindows()
-
-# 最終統計
-print("\n[最終收集統計]")
-all_done = True
-for g in GESTURES:
-    n      = len(os.listdir(os.path.join(DATA_DIR, g)))
-    bar    = "#" * (n // 4)
-    status = "OK" if n >= SAMPLES_PER_CLASS else "--"
-    if n < SAMPLES_PER_CLASS:
-        all_done = False
-    print(f"  [{status}] {g:6s}  {bar} {n}/{SAMPLES_PER_CLASS}")
-
-if all_done:
-    print("\n全部詞彙收集完成")
-else:
-    print("\n還沒完成")

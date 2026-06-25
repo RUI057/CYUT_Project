@@ -90,4 +90,12 @@ def augment_sequence(seq, rng):
         present = (np.abs(seq[:, off:off + HAND_DIM]).sum(1, keepdims=True) > 1e-6)
         seq[:, off:off + HAND_DIM] += noise[:, off:off + HAND_DIM] * present
 
+    # 隨機掉手：把某一隻手在一段連續幀清零，模擬即時偵測時的掉手
+    # （不超過 60% 長度，避免整段消失；單手手勢另一槽本來就是 0）
+    if rng.random() < 0.20:
+        off  = int(rng.integers(0, 2)) * HAND_DIM
+        span = int(T * rng.uniform(0.2, 0.6))
+        start = int(rng.integers(0, max(1, T - span + 1)))
+        seq[start:start + span, off:off + HAND_DIM] = 0.0
+
     return seq.astype(np.float32)
