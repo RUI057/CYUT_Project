@@ -13,6 +13,7 @@ from sklearn.metrics import classification_report, confusion_matrix
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from src.vocab import get_all_labels
 from src.features import normalize_sequence, augment_sequence
+from src.model import GestureLSTM
 
 # ── 參數 ──────────────────────────────────────
 GESTURES   = get_all_labels()
@@ -94,25 +95,7 @@ class GestureDataset(Dataset):
                 torch.tensor(self.y[i], dtype=torch.long))
 
 
-# ── LSTM 模型 ─────────────────────────────────
-class GestureLSTM(nn.Module):
-    def __init__(self, feat_dim, hidden=128, num_layers=2, num_classes=10, dropout=0.3):
-        super().__init__()
-        self.lstm = nn.LSTM(feat_dim, hidden, num_layers, batch_first=True,
-                            dropout=dropout, bidirectional=True)
-        self.dropout = nn.Dropout(dropout)
-        self.fc = nn.Sequential(
-            nn.Linear(hidden * 4, 64),  # 雙向(*2) × (mean+max 池化)(*2)
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(64, num_classes)
-        )
-    def forward(self, x):
-        out, _ = self.lstm(x)
-        feat = torch.cat([out.mean(1), out.max(1).values], dim=1)
-        return self.fc(self.dropout(feat))
-
-
+# ── LSTM 模型（定義集中於 src/model.py）────────
 def make_model():
     return GestureLSTM(feat_dim=FEAT_DIM, hidden=128, num_layers=2,
                        num_classes=N_CLASS).to(DEVICE)

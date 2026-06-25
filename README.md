@@ -26,7 +26,7 @@ CYUT_MDFK/
 ├── requirements.txt          Python 依賴
 ├── data/
 │   ├── vocabulary.json       詞彙列表
-│   ├── keypoints.csv         訓練數據紀錄
+│   ├── model.pkl             訓練後的模型
 │   └── 手語演示網址.txt
 ├── dynamic_dataset/          訓練數據目錄（按詞彙分類）
 │   ├── 工作/
@@ -36,8 +36,9 @@ CYUT_MDFK/
 ├── history/                  識別紀錄
 │   └── records.json
 └── src/
-    ├── camera.py             攝影機與特徵提取
-    ├── features.py           特徵預處理與增強
+    ├── camera.py             攝影機推理與穩定確認 (SignRecognizer)
+    ├── model.py              LSTM 模型定義（train/test/camera 共用）
+    ├── features.py           特徵抽取、尺度正規化與資料增強
     ├── vocab.py              詞彙管理
     ├── gemini_api.py         Gemini API 接口
     ├── tts.py                文字轉語音
@@ -84,13 +85,11 @@ python test_model.py
 
 啟動攝影機進行即時識別（OpenCV 視窗）。
 
-### 網頁即時翻譯（推薦）
+### 網頁即時翻譯
 
 ```bash
 streamlit run app.py
 ```
-
-瀏覽器開啟後，勾選「啟動攝影機」即可：
 
 1. 對著鏡頭比手語，系統即時辨識並累積詞彙
 2. 手離開畫面（停頓）→ 自動將詞彙序列送 Gemini 轉成自然中文句子
@@ -190,7 +189,6 @@ vocabulary.json 定義所有可識別的詞彙，修改后需重新收集數據�
 
 - 擴展詞彙數量
 - 本地化語義修正模型，減少 API 調用
-- 自動詞彙斷句與觸發機制
 - 全身姿勢識別支持
 - Docker 容器化部署
 - 離線模式支持
