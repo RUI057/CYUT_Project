@@ -1,12 +1,12 @@
 streamlit>=1.35.0
 opencv-python>=4.9.0
-mediapipe==0.10.7
+mediapipe>=0.10.7,<0.11
 matplotlib>=3.7.0
 google-genai>=0.8.0
 gtts>=2.5.0
 python-dotenv>=1.0.0
 Pillow>=10.0.0
-numpy>=1.26.0
+numpy>=1.26.0,<2.0   # mediapipe 0.10.x 以 numpy 1.x 編譯，裝到 2.x 會 crash
 torch>=2.2.0
 scikit-learn>=1.4.0
 pandas>=2.0.0

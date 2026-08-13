@@ -49,7 +49,7 @@ while True:
     h, w, _ = frame.shape
 
     state = rec.process(rgb)
-    camera.draw_landmarks(frame, state["results"])
+    camera.draw_landmarks(frame, state["results"], state.get("face_results"))
 
     if state["confirmed"]:
         confirmed_word = state["confirmed"]
