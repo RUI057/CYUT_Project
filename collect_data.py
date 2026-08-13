@@ -1,3 +1,4 @@
+import argparse
 import cv2
 import mediapipe as mp
 import numpy as np
@@ -23,6 +24,10 @@ from src.font_utils import get_font, put_text
 font_large  = get_font(50)
 font_medium = get_font(40)
 font_small  = get_font(40)
+
+_ap = argparse.ArgumentParser(description="收集手語資料")
+_ap.add_argument("--word", help="從哪個詞開始收集（預設：第一個還沒收滿的詞）")
+_args = _ap.parse_args()
 
 # ── 設定
 GESTURES         = get_all_labels()
@@ -50,8 +55,22 @@ if not cap.isOpened():
         if cap.isOpened():
             break
 
-# ── 狀態 
-current_gesture = 25
+# ── 決定從哪個詞開始
+def _count(label):
+    folder = os.path.join(DATA_DIR, label)
+    return len([f for f in os.listdir(folder) if f.endswith(".npy")]) if os.path.isdir(folder) else 0
+
+if _args.word:
+    if _args.word not in GESTURES:
+        print(f"[錯誤] 詞彙表裡沒有「{_args.word}」")
+        sys.exit(1)
+    current_gesture = GESTURES.index(_args.word)
+else:
+    # 預設從第一個還沒收滿的詞開始
+    current_gesture = next((i for i, g in enumerate(GESTURES)
+                            if _count(g) < SAMPLES_PER_CLASS), 0)
+
+# ── 狀態
 state           = "waiting"   # waiting → countdown → recording → cooldown
 sequence        = []
 hold_count      = 0
@@ -60,7 +79,7 @@ cooldown_count  = 0
 paused          = False
 print(f"[Session] {SESSION}")
 
-print("\nN=下一個  M=上一個  R=重置此詞彙  D=刪除上一個  S=暫停/繼續偵測  Q=離開")
+print("\nN=下一個  M=上一個  J=跳到指定詞彙  R=重置此詞彙  D=刪除上一個  S=暫停/繼續  Q=離開")
 print("按 S 可暫停偵測避免誤觸，按 D 可刪除上一筆已儲存資料\n")
 
 while cap.isOpened():
@@ -174,7 +193,7 @@ while cap.isOpened():
         frame = put_text(frame, f"提示：{hint_text}", (10, 180), font_large, (0, 0, 220))
 
     # 操作提示
-    frame = put_text(frame, "N=下一個  M=上一個  R=重置  D=刪除上一個  S=暫停/繼續  Q=離開",
+    frame = put_text(frame, "N=下一個 M=上一個 J=跳到指定詞 R=重置 D=刪除上一筆 S=暫停 Q=離開",
                      (10, h - 90), font_small, (120, 120, 120))
 
     cv2.imshow("手語資料收集", frame)
@@ -221,6 +240,32 @@ while cap.isOpened():
             print(f"[刪除] 已移除 {label} 的上一筆資料：{last_file}")
         else:
             print(f"[刪除] {label} 尚無資料可刪除")
+    elif key == ord('j'):
+        # 跳到指定詞彙：畫面暫停，回終端機輸入詞名（200 個詞用 N 翻太慢）
+        paused = True
+        print("\n" + "─" * 50)
+        print("跳到指定詞彙。可輸入「詞名」或「編號」，直接按 Enter 取消。")
+        未收滿 = [(i, g, _count(g)) for i, g in enumerate(GESTURES) if _count(g) < SAMPLES_PER_CLASS]
+        print(f"還沒收滿的詞（前 20 個，共 {len(未收滿)} 個）：")
+        for i, g, c in 未收滿[:20]:
+            print(f"  {i+1:>3}. {g}（{c} 筆）")
+        try:
+            ans = input("要跳到：").strip()
+        except (EOFError, KeyboardInterrupt):
+            ans = ""
+        if ans:
+            target = None
+            if ans.isdigit() and 1 <= int(ans) <= len(GESTURES):
+                target = int(ans) - 1
+            elif ans in GESTURES:
+                target = GESTURES.index(ans)
+            if target is None:
+                print(f"找不到「{ans}」，維持在目前的詞")
+            else:
+                current_gesture = target
+                state, sequence, hold_count = "waiting", [], 0
+                print(f"[切換] -> {GESTURES[current_gesture]}")
+        print("─" * 50 + "\n按 S 繼續收集\n")
     elif key == ord('s'):
         paused = not paused
         if paused:
