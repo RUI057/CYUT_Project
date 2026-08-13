@@ -91,7 +91,49 @@ def load_dataset(min_samples=0):
     n_session = sum(1 for g in groups if not g.startswith("legacy#"))
     print(f"[資料] {len(X)} 筆，{len(classes)} 個詞彙"
           f"（含 session 標記 {n_session} 筆 / 舊資料 {len(X)-n_session} 筆）")
+    face_balance_report(X, y, classes)
     return X, y, np.array(groups), classes
+
+
+def face_presence(X):
+    """每筆樣本是否含臉部資料 → (N,) bool。"""
+    return np.abs(X[:, :, HANDS_DIM:]).sum(axis=(1, 2)) > 1e-6
+
+
+def face_balance_report(X, y, classes, warn_gap=0.5):
+    """檢查「有沒有臉」是否洩漏了類別資訊。
+
+    若某些詞幾乎都有臉、另一些幾乎都沒臉，模型可以靠「臉在不在」
+    而不是手勢來分類，交叉驗證會虛高、真實推理卻會壞掉。
+    """
+    has_face = face_presence(X)
+    overall = has_face.mean()
+    if overall == 0:
+        print("[臉部] 全部樣本都沒有臉部資料（舊格式），臉部特徵不會發揮作用。")
+        return
+    if overall == 1:
+        print(f"[臉部] 全部 {len(X)} 筆都含臉部資料 ✅")
+        return
+
+    ratios = {c: float(has_face[y == i].mean()) for i, c in enumerate(classes)}
+    lo = sorted(ratios.items(), key=lambda kv: kv[1])
+    print(f"[臉部] {has_face.sum()}/{len(X)} 筆含臉部資料（{overall:.0%}）")
+
+    gap = lo[-1][1] - lo[0][1]
+    if gap >= warn_gap:
+        no_face  = [c for c, r in ratios.items() if r < 0.1]
+        yes_face = [c for c, r in ratios.items() if r > 0.9]
+        print("\n" + "!" * 60)
+        print("⚠️  警告：臉部資料分佈不均，模型可能學到「看有沒有臉」的捷徑")
+        print("!" * 60)
+        if yes_face:
+            print(f"  幾乎都有臉的詞（{len(yes_face)}）：{'、'.join(yes_face[:10])}")
+        if no_face:
+            print(f"  幾乎都沒臉的詞（{len(no_face)}）：{'、'.join(no_face[:10])}"
+                  + (" ..." if len(no_face) > 10 else ""))
+        print("  → 這會讓交叉驗證準確率虛高，實際使用時沒臉的那些詞會變差。")
+        print("  → 解法：替『沒臉』的詞各補收一些含臉樣本，讓每個詞都同時有兩種資料。")
+        print("!" * 60 + "\n")
 
 
 # ── Dataset ───────────────────────────────────
