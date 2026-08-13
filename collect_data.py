@@ -7,12 +7,17 @@ from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from src.vocab import get_all_labels, get_hint
-from src.features import extract_two_hands
+from src.features import extract_features
 
 mp_hands = mp.solutions.hands
+mp_face  = mp.solutions.face_mesh
 mp_draw  = mp.solutions.drawing_utils
 hands    = mp_hands.Hands(static_image_mode=False, max_num_hands=2,
                           min_detection_confidence=0.7)
+# 臉部非手動標記（眉/眼/嘴）；與手部分開跑，手部特徵與舊資料相容
+face     = mp_face.FaceMesh(static_image_mode=False, max_num_faces=1,
+                            refine_landmarks=False,
+                            min_detection_confidence=0.5)
 
 from src.font_utils import get_font, put_text
 font_large  = get_font(50)
@@ -22,10 +27,10 @@ font_small  = get_font(40)
 # ── 設定
 GESTURES         = get_all_labels()
 SEQUENCE_LENGTH  = 30   # 每筆幾幀
-SAMPLES_PER_CLASS = 200  # 每個詞彙幾筆
+SAMPLES_PER_CLASS = 200  # 每個詞彙幾筆s
 HOLD_FRAMES      = 15   # 手穩定幾幀後進入倒數
-COUNTDOWN_FRAMES = 36   # 倒數總幀數
-COOLDOWN_FRAMES  = 20   # 每筆錄完後冷卻幾幀
+COUNTDOWN_FRAMES = 12   # 倒數總幀數
+COOLDOWN_FRAMES  = 8   # 每筆錄完後冷卻幾幀
 DATA_DIR         = "dynamic_dataset"
 
 # 本次收集的 session 標記，寫進檔名 → 訓練時可做「同次錄製不跨組」的誠實切分
@@ -64,17 +69,23 @@ while cap.isOpened():
         break
     frame   = cv2.flip(frame, 1)
     rgb     = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    results = hands.process(rgb)
+    results  = hands.process(rgb)
+    face_res = face.process(rgb)
     h, w, _ = frame.shape
 
     label    = GESTURES[current_gesture]
     existing = len(os.listdir(os.path.join(DATA_DIR, label)))
     has_hand = results.multi_hand_landmarks is not None
+    has_face = bool(getattr(face_res, "multi_face_landmarks", None))
 
     # 畫手部骨架
     if has_hand:
         for hand_lms in results.multi_hand_landmarks:
             mp_draw.draw_landmarks(frame, hand_lms, mp_hands.HAND_CONNECTIONS)
+    # 畫臉部輪廓
+    if has_face:
+        mp_draw.draw_landmarks(frame, face_res.multi_face_landmarks[0],
+                               mp_face.FACEMESH_CONTOURS)
 
     # ── 狀態機
     if paused:
@@ -106,7 +117,7 @@ while cap.isOpened():
                 print(f"[錄製] {label}  第 {existing + 1} 筆")
 
     elif state == "recording":
-        feat = extract_two_hands(results)
+        feat = extract_features(results, face_res)
         sequence.append(feat)
         if len(sequence) == SEQUENCE_LENGTH:
             arr       = np.array(sequence)
@@ -151,14 +162,16 @@ while cap.isOpened():
         cv2.putText(frame, str(num), (w // 2 - 30, h // 2),
                     cv2.FONT_HERSHEY_SIMPLEX, 4.0, (0, 200, 255), 8)
 
-    # 有無偵測到手
+    # 有無偵測到手／臉
     hand_text  = f"偵測到 {len(results.multi_hand_landmarks)} 隻手" if has_hand else "未偵測到手"
+    hand_text += "  ｜臉：OK" if has_face else "  ｜臉：無"
     hand_color = (100, 220, 255) if has_hand else (80, 80, 200)
     frame = put_text(frame, hand_text, (10, 130), font_small, hand_color)
 
     # 手語提示
     hint_text = get_hint(label)
-    frame = put_text(frame, f"提示：{hint_text}", (10, 180), font_large, (0, 0, 220))
+    if hint_text:
+        frame = put_text(frame, f"提示：{hint_text}", (10, 180), font_large, (0, 0, 220))
 
     # 操作提示
     frame = put_text(frame, "N=下一個  M=上一個  R=重置  D=刪除上一個  S=暫停/繼續  Q=離開",

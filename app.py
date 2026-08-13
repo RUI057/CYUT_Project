@@ -195,7 +195,7 @@ if run and ss.cap is not None:
         rgb   = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         state = rec.process(rgb)
 
-        camera.draw_landmarks(frame, state["results"])
+        camera.draw_landmarks(frame, state["results"], state.get("face_results"))
 
         # 確認到新詞 → 加入序列（避免連續重複）
         if state["confirmed"]:
