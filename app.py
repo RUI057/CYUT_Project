@@ -102,7 +102,8 @@ def translate_words():
 # ── 側邊欄設定 ────────────────────────────────
 st.sidebar.title("設定")
 rec = ss.recognizer
-rec.conf_thresh    = st.sidebar.slider("信心門檻", 0.3, 1.0, float(round(rec.conf_thresh, 2)), 0.01,
+rec.conf_thresh    = st.sidebar.slider("信心門檻", 0.3, 1.0, float(round(rec.conf_thresh, 3)), 0.001,
+                                        format="%.3f",
                                         help="越高越保守，誤判少但較難觸發")
 rec.confirm_frames = st.sidebar.slider("連續確認幀數", 5, 30, rec.confirm_frames, 1,
                                         help="同一個詞連續幾幀才算數，越高越穩")
