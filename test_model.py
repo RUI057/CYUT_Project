@@ -9,12 +9,17 @@ from collections import deque
 
 import cv2
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+ROOT = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, ROOT)
+os.chdir(ROOT)
 from src import camera
 from src.font_utils import get_font, put_text
+from src.video import open_camera, camera_help, disable_ime, read_key
+
+disable_ime()   # Windows：避免注音輸入法攔截 Q、C 等按鍵（須在開視窗前）
 
 if not camera.is_ready():
-    print("[錯誤] 找不到 data/model.pkl，請先執行 train_model.py")
+    print("[錯誤] 模型沒有載入（原因見上方訊息），請先執行 train_model.py")
     sys.exit(1)
 
 print(f"[OK] 詞彙：{camera.get_classes()}")
@@ -25,13 +30,11 @@ font_large  = get_font(44)
 font_medium = get_font(28)
 font_small  = get_font(20)
 
-# ── 開啟攝影機 ────────────────────────────────
-cap = cv2.VideoCapture(0)
-if not cap.isOpened():
-    for i in range(1, 4):
-        cap = cv2.VideoCapture(i)
-        if cap.isOpened():
-            break
+# ── 開啟攝影機（Windows 優先 DirectShow，見 src/video.py）──
+cap = open_camera()
+if cap is None:
+    print("[錯誤] " + camera_help())
+    sys.exit(1)
 
 confirmed_word = ""
 confirmed_conf = 0.0
@@ -105,7 +108,7 @@ while True:
                 cv2.FONT_HERSHEY_SIMPLEX, 0.45, (100, 100, 100), 1)
 
     cv2.imshow("手語模型測試 (LSTM)", frame)
-    key = cv2.waitKey(1) & 0xFF
+    key = read_key()
     if key == ord('q'):
         break
     elif key == ord('c'):

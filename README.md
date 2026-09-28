@@ -4,13 +4,13 @@
 
 ## 概述
 
-本項目結合 MediaPipe 手部關鍵點檢測、PyTorch LSTM 時間序列模型及 Gemini API，建構一套從手語捕捉、特徵提取、詞彙識別到自然語言轉換的完整流程。系統支持本地訓練與推理，同時提供文字轉語音功能。
+本項目結合 MediaPipe 手部關鍵點檢測、PyTorch LSTM 時間序列模型及本機語言模型（可切換 Gemini API），建構一套從手語捕捉、特徵提取、詞彙識別到自然語言轉換的完整流程。系統支持本地訓練與推理，同時提供文字轉語音功能。
 
 ## 核心功能
 
 - 攝影機實時手語捕捉與特徵提取
 - 基於 LSTM 的時間序列詞彙識別
-- Gemini API 語義修正與自然句子生成
+- 本機語言模型語義修正與自然句子生成（離線、免 API 金鑰；可切換 Gemini）
 - Google TTS 文字語音合成
 - 訓練資料的自動收集與管理
 
@@ -18,29 +18,39 @@
 
 ```
 CYUT_MDFK/
+├── 開始.command / 開始.bat   雙擊開啟操作選單（Mac / Windows）
+├── start.py                  操作選單：收集 / 訓練 / 測試 / 查看進度 / 資料健檢
+├── setup_env.py              Windows 一鍵建立專用環境（由 開始.bat 呼叫）
 ├── app.py                    網頁即時翻譯
 ├── collect_data.py           收集訓練資料
-├── train_model.py            LSTM 模型訓練
+├── train_model.py            LSTM 模型訓練（交叉驗證報告存到 data/model_report.txt）
 ├── test_model.py             實時識別測試
-├── hand_landmarker.task      MediaPipe 模型文件
-├── requirements.txt          Python 依賴
+├── check_dataset.py          資料品質健檢
+├── compare_models.py         LSTM vs ST-GCN A/B 比較
+├── make_collect_kit.py       產生給組員的「手語收集包」
+├── merge_data.py             合併組員傳回的資料
+├── requirements.txt          Python 依賴（含翻譯網頁）
+├── requirements-core.txt     收集 / 訓練 / 測試的核心依賴與版本限制
 ├── data/
 │   ├── vocabulary.json       詞彙列表
+│   ├── hints.json            比法提示（收集畫面顯示）
 │   ├── model.pkl             訓練後的模型
-│   └── 手語演示網址.txt
-├── dynamic_dataset/          訓練數據目錄（按詞彙分類）
-│   ├── 工作/
-│   ├── 你好/
-│   ├── 謝謝/
-│   └── ... (25 個詞彙)
+│   └── 手語演示網址.txt      每個詞的示範影片
+├── dynamic_dataset/          訓練數據目錄（按詞彙分資料夾，每筆一個 .npy）
 ├── history/                  識別紀錄
 │   └── records.json
 └── src/
     ├── camera.py             攝影機推理與穩定確認 (SignRecognizer)
     ├── model.py              LSTM 模型定義（train/test/camera 共用）
-    ├── features.py           特徵抽取、尺度正規化與資料增強
+    ├── model_stgcn.py        ST-GCN 模型（A/B 比較用）
+    ├── graph.py              手部 21 點圖結構（ST-GCN 用）
+    ├── trainer.py            共用訓練流程（資料載入、交叉驗證、評估）
+    ├── features.py           特徵抽取、尺度正規化、資料增強、動作門檻
+    ├── video.py              攝影機與視窗的跨平台處理
     ├── vocab.py              詞彙管理
-    ├── gemini_api.py         Gemini API 接口
+    ├── translate.py          語義修正：詞彙序列 → 自然句子（後端切換、自我修正、退路）
+    ├── local_llm.py          本機語言模型（transformers，離線生成）
+    ├── gemini_api.py         Gemini 雲端後端（選用）
     ├── tts.py                文字轉語音
     └── font_utils.py         文字繪製工具
 ```
@@ -55,7 +65,6 @@ python collect_data.py
 
 選定詞彙後，手部穩定出現即自動連續錄製每筆 30 幀序列。按鍵控制：
 - N / M: 下一個 / 上一個詞彙
-- R: 重置目前詞彙的所有資料
 - D: 刪除上一筆
 - S: 暫停 / 繼續偵測（切換詞彙時會自動暫停，避免誤觸）
 - Q: 離開
@@ -68,14 +77,15 @@ python train_model.py
 
 使用 dynamic_dataset 中的訓練數據訓練 LSTM 模型。訓練參數：
 - 序列長度: 30 幀
-- 特徵維度: 126 (雙手 × 21 關鍵點 × 3 軸 xyz)
+- 特徵維度: 162（雙手 126 + 臉部 36；啟用位置時 168，見「特徵提取」）
 - 隱藏層: 128 單位，2 層雙向
 - 批次: 32
 - 訓練周期: 60
 - 學習率: 1e-3
 
 訓練時自動套用尺度正規化、資料增強（時間伸縮 / 旋轉 / 抖動）與類別權重（緩解樣本不平衡）。
-訓練結束會印出 classification report 與「最常誤判的詞對」，並生成 data/model.pkl。
+訓練結束會印出 classification report 與「最常誤判的詞對」，並生成 data/model.pkl；
+交叉驗證的結果另存到 data/model_report.txt，規劃要補收或重收哪些詞時可以對照。
 
 ### 實時測試
 
@@ -92,15 +102,15 @@ streamlit run app.py
 ```
 
 1. 對著鏡頭比手語，系統即時辨識並累積詞彙
-2. 手離開畫面（停頓）→ 自動將詞彙序列送 Gemini 轉成自然中文句子
+2. 手離開畫面（停頓）→ 自動將詞彙序列交給本機語言模型轉成自然中文句子（句子下方會標示由哪個後端產生）
 3. gTTS 朗讀句子，並保存到翻譯紀錄
 4. 也可手動按「翻譯 / 朗讀 / 清除」，左側側邊欄可調信心門檻與確認幀數
 
 ## 環境要求
 
-- Python 3.10+
+- Python 3.9～3.12（建議 3.11；3.13 以上 mediapipe 與 numpy 1.x 尚不支援）
 - 攝影機設備
-- Gemini API 密鑰（網頁語義翻譯需要；純辨識測試 test_model.py 可不用）
+- 網頁語義修正第一次使用會下載本機模型（約 3GB），之後可完全離線；Gemini API 密鑰改為選用
 - GPU 支持加速（CUDA 或 Apple Silicon MPS），可選
 
 ## 安裝與配置
@@ -113,10 +123,19 @@ pip install -r requirements.txt
 
 ### 2. 配置環境變量
 
-創建 .env 文件：
+全部選填，不設定就用預設值。創建 .env 文件：
 
 ```
-GEMINI_API_KEY=your_api_key_here
+POLISH_BACKEND=local                    # local（預設，本機模型）/ gemini / off（不修正）
+LOCAL_LLM=Qwen/Qwen2.5-1.5B-Instruct    # 換本機模型（Hugging Face 模型 id）
+GEMINI_API_KEY=your_api_key_here        # 選用：有設定時，本機模型失敗會自動改用 Gemini
+```
+
+預先下載本機模型（建議在有網路時先跑一次，展示時就不用等下載）：
+
+```bash
+python -m src.local_llm                 # 下載並載入
+python -m src.local_llm 明天 我 學校 去   # 試翻一句
 ```
 
 ### 3. 準備目錄
@@ -131,6 +150,8 @@ mkdir -p history
 
 使用 MediaPipe 檢測雙手各 21 個關鍵點的 (x, y, z) 座標，相對手腕做平移正規化（左手 63 維 + 右手 63 維 = 126 維）。餵入模型前再對每隻手做尺度正規化（除以手部大小），消除離鏡頭遠近造成的誤判。特徵抽取與正規化集中於 `src/features.py`，收集 / 訓練 / 推理三端共用以確保一致。
 
+每筆資料存成 170 維：雙手 126 + 臉部表情 36 + 位置 8。手部相對手腕、臉部相對鼻尖，兩者都看不到「手在哪裡」，所以另存手腕與鼻尖的畫面座標和臉的寬高，正規化時換算成「手腕相對鼻尖、以臉寬 / 臉高為單位」的位置（加上鼻尖的移動 = 點頭、搖頭）。用臉當基準點，站遠站近、站在畫面哪裡、鏡頭是 16:9 還是 4:3 都不影響；臉短暫被手擋住時用前後幀的鼻尖補回。臉部表情與位置特徵預設停用（`use_face` / `use_loc` 旗標），因為舊資料沒有，只有部分詞有時模型會靠「有沒有資料」作弊；每個詞都收夠之後以 `train_model.py --face` / `--loc` 啟用。停用時模型輸入仍為 162 維，與舊模型相容。
+
 ### 模型架構
 
 雙向 LSTM 用于捕捉時間序列中的手語動作特征：
@@ -139,15 +160,24 @@ mkdir -p history
 - 特徵融合: 時間維度平均池化 + 最大池化（256 × 2 = 512 維）
 - 全連接層: 512 -> 64 (ReLU) -> num_classes
 
+### 語義修正（src/translate.py）
+
+手語辨識出的是手語語序的詞彙序列（例如「明天、我、學校、去」），由本機語言模型改寫成自然中文（「我明天要去學校。」）：
+
+- **模型**：Qwen2.5-1.5B-Instruct。與 Qwen3-1.7B、Qwen3.5-0.8B、Qwen3.5-2B 比較後選定——語意錯誤最少、速度最快（Apple M5 平均 0.4 秒 / 句），且是標準注意力架構，Windows 純 CPU 也跑得動；Qwen3.5 系列會把「我 你 愛」翻成「你愛我」，且在沒有專用 kernel 的電腦上很慢
+- **Prompt**：系統指示 + 5 組少樣本範例（示範時間詞在前、疑問詞在句尾的手語語序），貪婪解碼，結果可重現
+- **自我修正**：句子漏掉某個詞、或自己加了序列裡沒有的疑問詞時，把問題回饋給模型重寫一次；真的變好才採用
+- **後處理**：OpenCC 轉台灣繁體（小模型偶爾冒出簡體字）；輸出太長或幾乎沒用到原詞時視為離題並擋下
+- **退路**：本機模型失敗 → Gemini（有金鑰時）→ 直接以「、」串接詞彙，網頁不會因翻譯而中斷
+
 ### 詞彙管理
 
 vocabulary.json 定義所有可識別的詞彙，修改后需重新收集數據並訓練模型。
 
 ## 詞彙列表
 
-當前支持 25 個詞彙，存儲在 dynamic_dataset 目錄中：
-
-工作、不好、不要、他、去、再見、吃飯、名字、好、你、你好、我、沒關係、來、看醫生、要、喜歡、喝水、睡覺、對不起、請、學校、錢、幫忙、謝謝
+詞彙表共 186 個詞（`data/vocabulary.json`），截至 2026-09 已收集並訓練其中 90 個。
+收集進度可用 `python start.py` →「查看進度」查看。
 
 ## 依賴包
 
@@ -157,7 +187,9 @@ vocabulary.json 定義所有可識別的詞彙，修改后需重新收集數據�
 | mediapipe | 手部關鍵點檢測 |
 | matplotlib | mediapipe 繪圖相依（必裝） |
 | opencv-python | 圖像處理與攝影機控制 |
-| google-genai | Gemini API 調用 |
+| transformers | 本機語言模型推理（語義修正） |
+| opencc-python-reimplemented | 簡體轉台灣繁體 |
+| google-genai | Gemini API 調用（選用） |
 | gtts | 文字語音合成 |
 | numpy | 數值計算 |
 | scikit-learn | 數據預處理 |
@@ -175,19 +207,23 @@ vocabulary.json 定義所有可識別的詞彙，修改后需重新收集數據�
 
 ## 性能參考
 
-基于 25 詞彙、每詞 100-130 筆訓練數據：
-- 識別準確率: 85-90%
-- 推理延遲: 50-100ms (GPU) / 200-300ms (CPU)
-- 內存占用: 500MB - 2GB
+2026-09，90 個詞、8,313 筆資料：
+- 5-fold 交叉驗證準確率 71.1%（session-aware 切分：同一次錄製的樣本不會同時出現在訓練與驗證，
+  數字比「隨機切分」誠實，也因此比早期 25 詞時的數字低，兩者不可直接比較）
+- 本機語義修正：Apple M 系列平均約 0.4 秒 / 句
 
 ## 更新紀錄
 
 2026.6.14 - 引入深度學習，採用 PyTorch + Bi-LSTM 
 2026.6.15 - 尺度正規化 + 資料增強 + 類別權重 + mean/max 池化，降低手勢誤判
+2026.7    - 加入臉部非手動標記（表情）特徵、ST-GCN 模型與 A/B 比較
+2026.9.19 - 一鍵操作選單、Windows 自動建環境、組員收集包與資料合併
+2026.9.25 - 語義修正改為本機語言模型（Qwen2.5-1.5B），Gemini 改為選用備援
+2026.9.28 - 加入手相對臉部的位置特徵；每個詞各自的動作門檻（靜態手勢如「誰」不再被擋掉）
 
 ## 未來計劃
 
-- 擴展詞彙數量
-- 本地化語義修正模型，減少 API 調用
+- 擴展詞彙數量（目前 90 / 186 詞有資料）
+- 用新版收集程式補收含位置資料，啟用位置特徵（`train_model.py --loc`）
 - 全身姿勢識別支持
-- 離線模式支持
+- 離線語音朗讀（目前 gTTS 需要網路，其餘流程已可離線）

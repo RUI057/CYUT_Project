@@ -1,12 +1,18 @@
+# 核心：收集 / 訓練 / 測試（版本限制與原因見 requirements-core.txt）
+-r requirements-core.txt
+
+# 翻譯網頁 app.py
 streamlit>=1.35.0
-opencv-python>=4.9.0
-mediapipe>=0.10.7,<0.11
 matplotlib>=3.7.0
-google-genai>=0.8.0
 gtts>=2.5.0
 python-dotenv>=1.0.0
-Pillow>=10.0.0
-numpy>=1.26.0,<2.0   # mediapipe 0.10.x 以 numpy 1.x 編譯，裝到 2.x 會 crash
-torch>=2.2.0
-scikit-learn>=1.4.0
 pandas>=2.0.0
+
+# 語義修正：本機語言模型（預設，見 src/translate.py）
+# - transformers >=4.56：from_pretrained 的 dtype 參數從這版開始
+# - opencc：小模型偶爾輸出簡體字，統一轉成台灣繁體
+transformers>=4.56
+opencc-python-reimplemented>=0.1.7
+
+# 語義修正：Gemini 雲端後端（選用；POLISH_BACKEND=gemini，或本機模型失敗時的備援）
+google-genai>=0.8.0

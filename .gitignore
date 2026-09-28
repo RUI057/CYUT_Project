@@ -2,3 +2,14 @@
 history/
 __pycache__/
 *.pyc
+.venv/
+
+# make_collect_kit.py 產生的收集包（隨時可重建，不進版控）
+手語收集包/
+手語收集包.zip
+# 組員傳來 / 打包出的資料 zip（合併後資料會進 dynamic_dataset）
+手語資料_*.zip
+
+# macOS Finder 自動產生的檔案、資料健檢報告（check_dataset.py 每次重新產生）
+.DS_Store
+data/quality_report.txt

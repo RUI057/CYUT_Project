@@ -9,6 +9,7 @@
   - 或終端機執行： python start.py
 """
 import os
+import re
 import subprocess
 import sys
 from collections import Counter
@@ -20,12 +21,43 @@ sys.path.insert(0, str(ROOT))
 
 BAR = "═" * 58
 IS_TTY = sys.stdin is not None and sys.stdin.isatty()
+IS_WIN = os.name == "nt"
+VCREDIST_URL = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
 
-# 各功能需要的套件：import 名稱 → pip 安裝名稱
-PKG_COLLECT = [("cv2", "opencv-python>=4.9.0"), ("mediapipe", "mediapipe>=0.10.7,<0.11"),
-               ("PIL", "Pillow>=10.0.0"), ("numpy", "numpy>=1.26,<2.0")]
-PKG_TRAIN   = [("numpy", "numpy>=1.26,<2.0"), ("torch", "torch>=2.2.0"),
-               ("sklearn", "scikit-learn>=1.4.0")]
+
+def _load_specs():
+    """讀 requirements-core.txt → {pip 名稱(小寫): 版本規格}。版本限制只維護那一份。"""
+    specs = {}
+    path = ROOT / "requirements-core.txt"
+    if path.exists():
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.split("#", 1)[0].strip()
+            if line and not line.startswith("-"):
+                specs[re.split(r"[<>=!~;\[\s]", line, 1)[0].lower()] = line
+    return specs
+
+
+_SPECS = _load_specs()
+
+# 各功能需要的套件：(import 名稱, pip 安裝規格)
+PKG_COLLECT = [("cv2", _SPECS.get("opencv-python", "")), ("mediapipe", _SPECS.get("mediapipe", "")),
+               ("PIL", _SPECS.get("pillow", "")), ("numpy", _SPECS.get("numpy", ""))]
+PKG_TRAIN   = [("numpy", _SPECS.get("numpy", "")), ("torch", _SPECS.get("torch", "")),
+               ("sklearn", _SPECS.get("scikit-learn", ""))]
+
+# 在獨立 process 檢查套件：避免本程式已載入的舊模組干擾判斷，裝完後也能反映新版本
+_CHECK_CODE = r"""
+import importlib, sys
+for m in sys.argv[1:]:
+    try:
+        mod = importlib.import_module(m)
+        if m == "mediapipe" and not hasattr(mod, "solutions"):
+            raise ImportError("mediapipe %s 太新，已移除本專案需要的 solutions API"
+                              % getattr(mod, "__version__", "?"))
+    except Exception as e:
+        print(m + "\t" + (type(e).__name__ + ": " + str(e)).replace("\n", " "))
+"""
+_OK = set()     # 本次已確認能用的套件，不用每次重查
 
 
 def title(msg):
@@ -48,27 +80,66 @@ def ask_yes(msg):
         return False
 
 
+def _broken(mods):
+    """回傳 {不能用的模組: 錯誤訊息}（在獨立 process 檢查）。"""
+    r = subprocess.run([sys.executable, "-c", _CHECK_CODE, *mods],
+                       capture_output=True, text=True, errors="replace")
+    bad = {}
+    for line in r.stdout.splitlines():
+        m, _, err = line.partition("\t")
+        if m in mods:
+            bad[m] = err
+    if r.returncode != 0:           # 檢查程式本身掛掉（原生套件崩潰）→ 沒回報的都當壞的
+        tail = (r.stderr.strip().splitlines() or ["未知錯誤"])[-1]
+        for m in mods:
+            bad.setdefault(m, tail)
+    return bad
+
+
+def _is_dll_error(msg):
+    return any(k in msg for k in ("DLL load failed", "WinError 126", "c10.dll"))
+
+
+def _print_vcredist_help():
+    print("\n👉 這是 Windows 缺少「Microsoft Visual C++ 可轉散發套件」，重裝 Python 套件沒有用。")
+    print(f"   下載安裝後重新開啟：{VCREDIST_URL}")
+    print("   或在命令提示字元執行：winget install Microsoft.VCRedist.2015+.x64")
+
+
 def ensure_packages(pkgs, what):
-    """檢查套件，缺的話問要不要裝。回傳 True 表示可以繼續。"""
-    missing = []
-    for mod, spec in pkgs:
-        try:
-            __import__(mod)
-        except ImportError:
-            missing.append((mod, spec))
+    """檢查套件，缺的或版本不對的問要不要裝。回傳 True 表示可以繼續。"""
+    if not _SPECS:
+        print("\n❌ 找不到 requirements-core.txt，專案檔案不完整，請重新下載專案。")
+        return False
+    todo = [(m, s) for m, s in pkgs if m not in _OK]
+    if not todo:
+        return True
+    bad = _broken([m for m, _ in todo])
+    _OK.update(m for m, _ in todo if m not in bad)
+    missing = [(m, s) for m, s in todo if m in bad]
     if not missing:
         return True
 
-    print(f"\n「{what}」需要這些套件，但還沒安裝：")
+    if any(_is_dll_error(bad[m]) for m, _ in missing):
+        for m, _ in missing:
+            print(f"\n❌ {m} 無法載入：{bad[m][:160]}")
+        _print_vcredist_help()
+        return False
+
+    print(f"\n「{what}」需要這些套件，但還沒安裝或版本不對：")
     for mod, spec in missing:
-        print(f"  - {spec}")
+        why = bad[mod]
+        note = "" if why.startswith("ModuleNotFoundError") else f"\n      （{why[:120]}）"
+        print(f"  - {spec}{note}")
     if not ask_yes("\n要現在自動安裝嗎？"):
         print("\n已取消。你也可以手動安裝：")
         print(f"  {sys.executable} -m pip install " + " ".join(s for _, s in missing))
         return False
 
-    cmd = [sys.executable, "-m", "pip", "install"] + [s for _, s in missing]
-    print(f"\n執行：{' '.join(cmd)}\n")
+    # -c：只裝缺的套件時，其他已裝套件（例如 numpy）也不會被相依性連帶升級到超出限制
+    cmd = [sys.executable, "-m", "pip", "install", "-c", str(ROOT / "requirements-core.txt")] \
+          + [s for _, s in missing]
+    print(f"\n執行：{' '.join(cmd)}\n", flush=True)
     if subprocess.call(cmd) != 0:
         print("\n第一次安裝失敗，改用 --user 再試一次...\n")
         if subprocess.call(cmd + ["--user"]) != 0:
@@ -78,12 +149,16 @@ def ensure_packages(pkgs, what):
             print("     pip install -r requirements.txt")
             return False
 
-    for mod, _ in missing:
-        try:
-            __import__(mod)
-        except ImportError:
-            print(f"\n❌ 安裝完仍找不到 {mod}，可能裝到別的 Python 環境了。")
-            return False
+    still = _broken([m for m, _ in missing])
+    if still:
+        for m, err in still.items():
+            print(f"\n❌ 安裝完 {m} 仍無法使用：{err[:160]}")
+        if any(_is_dll_error(e) for e in still.values()):
+            _print_vcredist_help()
+        else:
+            print("   可能裝到別的 Python 環境了，請把上面的訊息截圖傳給組長。")
+        return False
+    _OK.update(m for m, _ in missing)
     print("\n套件安裝完成 ✅")
     return True
 
@@ -92,7 +167,7 @@ def data_counts():
     """回傳 {詞: 筆數}（只算格式正確的）。"""
     import numpy as np
     from src.vocab import get_all_labels
-    from src.features import HANDS_DIM, FEAT_DIM
+    from src.features import VALID_DIMS
 
     counts = Counter()
     for label in get_all_labels():
@@ -104,7 +179,7 @@ def data_counts():
                 shape = np.load(f, mmap_mode="r").shape
             except Exception:
                 continue
-            if len(shape) == 2 and shape[0] == 30 and shape[1] in (HANDS_DIM, FEAT_DIM):
+            if len(shape) == 2 and shape[0] == 30 and shape[1] in VALID_DIMS:
                 counts[label] += 1
     return counts
 
@@ -165,9 +240,12 @@ def do_collect():
     print("操作說明：")
     print("  手放進畫面 → 倒數 3-2-1 → 比出手勢 → 自動存檔")
     print("  N=下一個詞    M=上一個詞    J=跳到指定詞")
-    print("  D=刪除上一筆  R=重置此詞    S=暫停    Q=離開")
+    print("  D=刪除上一筆  S=暫停    Q=離開")
     print("\n⚠️ 第一次執行時，系統會詢問攝影機權限，請按「允許」。")
     print("   若沒有出現畫面，檢查有沒有別的程式正在用攝影機。")
+    if IS_WIN:
+        print("   Windows 黑畫面：設定 → 隱私權與安全性 → 相機 → 開啟「讓桌面應用程式存取您的相機」")
+    print("   按鍵沒反應：先用滑鼠點一下攝影機畫面，讓它在最上層。")
     if not ask_yes("\n準備好了嗎？"):
         return
     subprocess.call(cmd)
@@ -196,21 +274,8 @@ def do_train():
         return
 
     if mode == "2":
-        # 跳過交叉驗證：直接用全部資料訓練並存檔
-        code = (
-            "import pickle, numpy as np;"
-            "from src.trainer import load_dataset, train_full, DEVICE, SEQ_LEN;"
-            "from src.features import FEAT_DIM;"
-            "from src.model import GestureLSTM;"
-            "X, y, g, c = load_dataset();"
-            "f = lambda: GestureLSTM(feat_dim=FEAT_DIM, num_classes=len(c)).to(DEVICE);"
-            "s = train_full(f, X, y, len(c));"
-            "pickle.dump({'model_state': s, 'classes': c, 'seq_len': SEQ_LEN,"
-            " 'feat_dim': FEAT_DIM, 'hidden': 128, 'num_layers': 2,"
-            " 'cv_acc_mean': 0.0, 'cv_acc_std': 0.0}, open('data/model.pkl','wb'));"
-            "print('\\n[完成] 模型已存到 data/model.pkl')"
-        )
-        rc = subprocess.call([sys.executable, "-c", code])
+        print("\n開始快速訓練...\n")
+        rc = subprocess.call([sys.executable, "train_model.py", "--quick"])
     else:
         print("\n開始完整訓練，請耐心等待（有 GPU 約 15 分鐘，純 CPU 可能 1 小時以上）...\n")
         rc = subprocess.call([sys.executable, "train_model.py"])
@@ -235,12 +300,75 @@ def do_test():
 
 
 def do_check():
-    if not ensure_packages([("numpy", "numpy>=1.26,<2.0")], "檢查資料品質"):
+    if not ensure_packages([("numpy", _SPECS.get("numpy", ""))], "檢查資料品質"):
         return
     subprocess.call([sys.executable, "check_dataset.py"])
 
 
-MENU = """
+def _reveal(path):
+    """在檔案總管／Finder 中選取這個檔案，方便組員找到並傳送。"""
+    try:
+        if IS_WIN:
+            subprocess.Popen(["explorer", f"/select,{path}"])
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", "-R", str(path)])
+    except OSError:
+        pass
+
+
+def do_pack():
+    """把收集到的資料打包成 zip 傳給組長。
+
+    用程式打包而不是手動壓縮：Python 的 zip 會標記 UTF-8 檔名，
+    詞資料夾（什麼、哪裡…）在任何電腦解開都不會變亂碼；組長用 merge_data.py 合併。
+    """
+    import zipfile
+    from datetime import datetime
+
+    data = ROOT / "dynamic_dataset"
+    files = sorted(data.glob("*/*.npy")) if data.is_dir() else []
+    if not files:
+        print("\n❌ 還沒有收集到任何資料，請先選 1 收集資料。")
+        return
+    counts = Counter(f.parent.name for f in files)
+    title("打包資料")
+    print(f"共 {len(files)} 筆、{len(counts)} 個詞：")
+    for w, n in sorted(counts.items(), key=lambda kv: -kv[1]):
+        print(f"  {w:<8}{n:>5}")
+    try:
+        name = input("\n你的名字（會放進檔名，方便組長辨認；可直接按 Enter 略過）：").strip()
+    except (EOFError, KeyboardInterrupt):
+        return
+    name = re.sub(r'[\\/:*?"<>|\s]+', "_", name)[:20]
+    stamp = datetime.now().strftime("%Y%m%d_%H%M")
+    out = ROOT / f"手語資料_{name + '_' if name else ''}{stamp}.zip"
+
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+        for f in files:
+            z.write(f, f.relative_to(ROOT).as_posix())
+        info = ROOT / "KIT_VERSION.txt"
+        if info.exists():
+            z.write(info, info.name)
+    print(f"\n✅ 已打包：{out.name}（{out.stat().st_size / 1e6:.1f} MB）")
+    print("   把這個檔案傳給組長就好（LINE、雲端硬碟都可以），不用再自己壓縮。")
+    print("   原本的資料還在，之後可以繼續收；再打包一次會包含全部資料，組長合併時會自動略過重複的。")
+    _reveal(out)
+
+
+# 純收集版（make_collect_kit.py 產生）沒有訓練程式 → 只顯示收集相關的功能
+KIT = not (ROOT / "train_model.py").exists()
+
+if KIT:
+    MENU_TITLE = "手語資料收集"
+    MENU = """
+  1. 收集資料      用攝影機錄製手語動作
+  2. 查看進度      看哪些詞收了、哪些還沒
+  3. 打包資料      收完後打包成一個檔案，傳給組長
+  0. 離開
+"""
+else:
+    MENU_TITLE = "手語辨識專案　操作選單"
+    MENU = """
   1. 收集資料      用攝影機錄製手語動作
   2. 訓練模型      用收集到的資料訓練
   3. 測試辨識      用攝影機測試訓練好的模型
@@ -253,16 +381,24 @@ MENU = """
 def main():
     v = sys.version_info
     if v < (3, 9):
-        print(f"❌ Python 版本太舊（{v.major}.{v.minor}），需要 3.9 以上。")
-        print("👉 到 https://www.python.org/downloads/ 安裝 Python 3.10 或 3.11。")
+        print(f"❌ Python 版本太舊（{v.major}.{v.minor}），需要 3.9～3.12。")
+        print("👉 到 https://www.python.org/downloads/release/python-3119/ 安裝 Python 3.11。")
         pause()
         return
+    if v >= (3, 13):
+        # 不直接擋：已裝好套件的人仍可用「查看進度」等功能，但安裝套件一定會失敗
+        print(f"⚠️  Python {v.major}.{v.minor} 太新：numpy 1.x 與 mediapipe 沒有對應版本，"
+              "自動安裝套件會失敗。")
+        print("   建議安裝 Python 3.11：https://www.python.org/downloads/release/python-3119/")
 
-    actions = {"1": do_collect, "2": do_train, "3": do_test,
-               "4": lambda: show_progress(), "5": do_check}
+    if KIT:
+        actions = {"1": do_collect, "2": lambda: show_progress(), "3": do_pack}
+    else:
+        actions = {"1": do_collect, "2": do_train, "3": do_test,
+                   "4": lambda: show_progress(), "5": do_check}
 
     while True:
-        title("手語辨識專案　操作選單")
+        title(MENU_TITLE)
         print(f"Python {v.major}.{v.minor}.{v.micro}　工作目錄：{ROOT.name}")
         print(MENU)
         try:

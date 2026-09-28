@@ -40,7 +40,7 @@ def get_font(size: int) -> ImageFont.FreeTypeFont:
                 continue
 
     # 都找不到就用預設（不支援中文但不會 crash）
-    print(f"[警告] 找不到中文字型，畫面中文可能顯示亂碼")
+    print("[警告] 找不到中文字型，畫面中文可能顯示亂碼")
     return ImageFont.load_default()
 
 

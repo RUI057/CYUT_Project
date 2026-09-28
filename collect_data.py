@@ -8,17 +8,20 @@ from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from src.vocab import get_all_labels, get_hint
-from src.features import extract_features
+from src.features import (extract_features, extract_position, BASE_DIM,
+                          MP_HANDS_KWARGS, MP_FACE_KWARGS)
+from src.video import open_camera, camera_help, disable_ime, read_key
+from collections import Counter, deque
+
+disable_ime()   # Windows：避免注音輸入法攔截 N、Q 等按鍵（須在開視窗前）
 
 mp_hands = mp.solutions.hands
 mp_face  = mp.solutions.face_mesh
 mp_draw  = mp.solutions.drawing_utils
-hands    = mp_hands.Hands(static_image_mode=False, max_num_hands=2,
-                          min_detection_confidence=0.7)
+# 參數與推理端 src/camera.py 共用（src/features.py），確保收集/推理偵測行為一致
+hands    = mp_hands.Hands(**MP_HANDS_KWARGS)
 # 臉部非手動標記（眉/眼/嘴）；與手部分開跑，手部特徵與舊資料相容
-face     = mp_face.FaceMesh(static_image_mode=False, max_num_faces=1,
-                            refine_landmarks=False,
-                            min_detection_confidence=0.5)
+face     = mp_face.FaceMesh(**MP_FACE_KWARGS)
 
 from src.font_utils import get_font, put_text
 font_large  = get_font(50)
@@ -36,6 +39,9 @@ SAMPLES_PER_CLASS = 200  # 每個詞彙幾筆s
 HOLD_FRAMES      = 15   # 手穩定幾幀後進入倒數
 COUNTDOWN_FRAMES = 12   # 倒數總幀數
 COOLDOWN_FRAMES  = 8   # 每筆錄完後冷卻幾幀
+NO_HAND_GRACE    = 5   # 連續幾幀沒偵測到手才算「手不見」（MediaPipe 偶爾掉 1-2 幀）
+DISPLAY_SMOOTH   = 7   # 畫面顯示的手數取最近幾幀的多數，避免「2 隻手」一閃一閃
+MIN_FACE_PCT     = 0.5 # 一筆裡有臉的幀少於這個比例 → 提醒（位置以臉為基準，沒臉就沒位置）
 DATA_DIR         = "dynamic_dataset"
 
 # 本次收集的 session 標記，寫進檔名 → 訓練時可做「同次錄製不跨組」的誠實切分
@@ -47,13 +53,11 @@ for g in GESTURES:
 
 # extract_two_hands 改用 src/features（與 train/test 共用，確保特徵格式一致）
 
-# ── 攝影機
-cap = cv2.VideoCapture(0)
-if not cap.isOpened():
-    for i in range(1, 4):
-        cap = cv2.VideoCapture(i)
-        if cap.isOpened():
-            break
+# ── 攝影機（Windows 優先 DirectShow，見 src/video.py）
+cap = open_camera()
+if cap is None:
+    print("[錯誤] " + camera_help())
+    sys.exit(1)
 
 # ── 決定從哪個詞開始
 def _count(label):
@@ -74,12 +78,15 @@ else:
 state           = "waiting"   # waiting → countdown → recording → cooldown
 sequence        = []
 hold_count      = 0
+miss_count      = 0                          # 連續沒偵測到手的幀數
+recent_hands    = deque(maxlen=DISPLAY_SMOOTH)  # 最近幾幀偵測到的手數
 countdown_count = 0
 cooldown_count  = 0
 paused          = False
+face_warn       = ""                         # 上一筆臉入鏡不足的提醒（顯示在畫面上）
 print(f"[Session] {SESSION}")
 
-print("\nN=下一個  M=上一個  J=跳到指定詞彙  R=重置此詞彙  D=刪除上一個  S=暫停/繼續  Q=離開")
+print("\nN=下一個  M=上一個  J=跳到指定詞彙  D=刪除上一個  S=暫停/繼續  Q=離開")
 print("按 S 可暫停偵測避免誤觸，按 D 可刪除上一筆已儲存資料\n")
 
 while cap.isOpened():
@@ -96,6 +103,13 @@ while cap.isOpened():
     existing = len(os.listdir(os.path.join(DATA_DIR, label)))
     has_hand = results.multi_hand_landmarks is not None
     has_face = bool(getattr(face_res, "multi_face_landmarks", None))
+    n_hands  = len(results.multi_hand_landmarks) if has_hand else 0
+
+    # 短暫掉手不算手不見：MediaPipe 常掉 1-2 幀，原本一掉就把倒數整個打斷
+    miss_count = 0 if has_hand else miss_count + 1
+    hand_ok    = miss_count < NO_HAND_GRACE
+    recent_hands.append(n_hands)
+    shown_n    = Counter(recent_hands).most_common(1)[0][0]
 
     # 畫手部骨架
     if has_hand:
@@ -105,6 +119,15 @@ while cap.isOpened():
     if has_face:
         mp_draw.draw_landmarks(frame, face_res.multi_face_landmarks[0],
                                mp_face.FACEMESH_CONTOURS)
+    # 畫位置：鼻尖 → 手腕連線，就是模型看到的「手在臉的哪裡」
+    pos = extract_position(results, face_res)
+    if has_face:
+        nose = (int(pos[4] * w), int(pos[5] * h))
+        for k in (0, 1):
+            if pos[2 * k] or pos[2 * k + 1]:
+                cv2.line(frame, nose, (int(pos[2 * k] * w), int(pos[2 * k + 1] * h)),
+                         (0, 200, 255), 2)
+        cv2.circle(frame, nose, 6, (255, 255, 255), -1)
 
     # ── 狀態機
     if paused:
@@ -114,18 +137,18 @@ while cap.isOpened():
         state = "done"
 
     elif state == "waiting":
-        if has_hand:
+        if not hand_ok:
+            hold_count = 0
+        elif has_hand:                       # 容忍期內的掉幀：不累積也不歸零
             hold_count += 1
             if hold_count >= HOLD_FRAMES:
                 state           = "countdown"
                 countdown_count = COUNTDOWN_FRAMES
                 hold_count      = 0
-        else:
-            hold_count = 0
 
     elif state == "countdown":
-        # 倒數期間手必須在；手不見就退回等待
-        if not has_hand:
+        # 倒數期間手必須在；連續掉手超過容忍幀數才退回等待
+        if not hand_ok:
             state = "waiting"
             hold_count = 0
         else:
@@ -143,7 +166,12 @@ while cap.isOpened():
             save_path = os.path.join(DATA_DIR, label, f"{SESSION}_{existing}.npy")
             np.save(save_path, arr)
             existing += 1
-            print(f"[儲存] {label}  {existing}/{SAMPLES_PER_CLASS}")
+            # 有臉的幀比例（鼻尖有值）：太少代表這筆大多沒有位置資訊
+            face_pct = float((np.abs(arr[:, BASE_DIM + 4:BASE_DIM + 6]).sum(1) > 1e-6).mean())
+            face_warn = "" if face_pct >= MIN_FACE_PCT else \
+                f"上一筆只有 {face_pct:.0%} 的幀有臉 → 缺位置資訊，可按 D 刪除重錄"
+            print(f"[儲存] {label}  {existing}/{SAMPLES_PER_CLASS}"
+                  + (f"  ⚠️ {face_warn}" if face_warn else ""))
             state          = "cooldown"
             cooldown_count = COOLDOWN_FRAMES
             sequence       = []
@@ -182,10 +210,17 @@ while cap.isOpened():
                     cv2.FONT_HERSHEY_SIMPLEX, 4.0, (0, 200, 255), 8)
 
     # 有無偵測到手／臉
-    hand_text  = f"偵測到 {len(results.multi_hand_landmarks)} 隻手" if has_hand else "未偵測到手"
-    hand_text += "  ｜臉：OK" if has_face else "  ｜臉：無"
-    hand_color = (100, 220, 255) if has_hand else (80, 80, 200)
+    hand_text  = f"偵測到 {shown_n} 隻手" if shown_n else "未偵測到手"
+    hand_text += "  ｜臉：OK  位置：OK" if has_face else "  ｜臉：無  位置：無"
+    hand_color = (100, 220, 255) if shown_n else (80, 80, 200)
     frame = put_text(frame, hand_text, (10, 130), font_small, hand_color)
+
+    # 臉沒入鏡提醒：位置以臉為基準，手在畫面但臉不在 → 這段錄到的沒有位置資訊
+    if shown_n and not has_face and not paused:
+        frame = put_text(frame, "注意：臉沒入鏡，請讓臉也在畫面內（位置要以臉為基準）",
+                         (10, h - 180), font_small, (255, 70, 70))
+    elif face_warn and not paused:
+        frame = put_text(frame, f"注意：{face_warn}", (10, h - 180), font_small, (255, 170, 0))
 
     # 手語提示
     hint_text = get_hint(label)
@@ -193,11 +228,11 @@ while cap.isOpened():
         frame = put_text(frame, f"提示：{hint_text}", (10, 180), font_large, (0, 0, 220))
 
     # 操作提示
-    frame = put_text(frame, "N=下一個 M=上一個 J=跳到指定詞 R=重置 D=刪除上一筆 S=暫停 Q=離開",
+    frame = put_text(frame, "N=下一個 M=上一個 J=跳到指定詞 D=刪除上一筆 S=暫停 Q=離開",
                      (10, h - 90), font_small, (120, 120, 120))
 
     cv2.imshow("手語資料收集", frame)
-    key = cv2.waitKey(1) & 0xFF
+    key = read_key()
 
     if key == ord('q'):
         break
@@ -207,6 +242,7 @@ while cap.isOpened():
         sequence = []
         hold_count = 0
         paused = True  
+        face_warn = ""
         print(f"[切換] -> {GESTURES[current_gesture]}")
     elif key == ord('m'):
         current_gesture = (current_gesture - 1) % len(GESTURES)
@@ -214,18 +250,8 @@ while cap.isOpened():
         sequence = []
         hold_count = 0
         paused = True  
+        face_warn = ""
         print(f"[切換] -> {GESTURES[current_gesture]}")
-    elif key == ord('r'):
-        # 重置此詞彙的資料
-        folder = os.path.join(DATA_DIR, label)
-        for f in os.listdir(folder):
-            if f.endswith(".npy"):
-                os.remove(os.path.join(folder, f))
-        state = "waiting"
-        sequence = []
-        hold_count = 0
-        paused = False
-        print(f"[重置] {label} 的資料已清除")
     elif key == ord('d'):
         folder = os.path.join(DATA_DIR, label)
         samples = [f for f in os.listdir(folder) if f.endswith('.npy')]
@@ -234,6 +260,7 @@ while cap.isOpened():
             samples.sort(key=lambda x: os.path.getmtime(os.path.join(folder, x)))
             last_file = samples[-1]
             os.remove(os.path.join(folder, last_file))
+            face_warn = ""
             state = "waiting"
             sequence = []
             hold_count = 0
@@ -264,6 +291,7 @@ while cap.isOpened():
             else:
                 current_gesture = target
                 state, sequence, hold_count = "waiting", [], 0
+                face_warn = ""
                 print(f"[切換] -> {GESTURES[current_gesture]}")
         print("─" * 50 + "\n按 S 繼續收集\n")
     elif key == ord('s'):

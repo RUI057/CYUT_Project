@@ -1,14 +1,19 @@
 """共用特徵處理：抽取、尺度正規化、資料增強。
 
-特徵組成（共 162 維）：
-- 前 126 維：雙手 [左手 63][右手 63]，每隻手相對手腕（與舊資料相容）。
-- 後  36 維：臉部 18 個非手動標記點（眉/眼/嘴）的 (x,y)，相對鼻尖。
+儲存格式（.npy，共 170 維）：
+- [0:126]   雙手 [左手 63][右手 63]，每隻手相對手腕 → 手形與手的轉動
+- [126:162] 臉部 18 個非手動標記點（眉/眼/嘴）的 (x,y)，相對鼻尖 → 表情
+- [162:170] 位置：左手腕 (x,y)、右手腕 (x,y)、鼻尖 (x,y) 的畫面座標 + 臉寬、臉高
+            → 手在身體哪裡、手的移動軌跡、頭部移動（前兩塊都減掉了自己的原點，看不到這些）
 
 設計原則：
-- 儲存到 .npy 的永遠是「raw 特徵」（手減手腕、臉減鼻尖，只做平移）。
-  舊資料只有 126 維，載入時用 pad_features 於臉部補 0，維持相容。
+- 儲存到 .npy 的永遠是「raw 特徵」（手減手腕、臉減鼻尖；位置存畫面座標）。
+  舊資料只有 126 / 162 維，載入時用 pad_features 補 0，維持相容。
 - 尺度正規化(normalize_sequence) 只在「餵進模型前」套用
   （訓練載入 + 即時推理），collect/train/test 三邊一致。
+- 位置在正規化時才換算成「相對鼻尖、以臉的寬高為單位」：
+  存畫面座標是為了臉短暫被手擋住時，還能用前後幀的鼻尖補回位置。
+- 模型輸入由 to_model_input 決定：未啟用位置時只取前 162 維，舊模型不用重訓。
 """
 import numpy as np
 
@@ -30,7 +35,72 @@ FACE_POINTS = [
 FACE_EYE_L, FACE_EYE_R = 0, 4     # 兩眼外角在 FACE_POINTS 內的索引（供尺度用）
 FACE_DIM = len(FACE_POINTS) * 2   # 18 * 2 = 36
 
-FEAT_DIM = HANDS_DIM + FACE_DIM    # 126 + 36 = 162
+BASE_DIM = HANDS_DIM + FACE_DIM    # 126 + 36 = 162：舊儲存格式，也是未啟用位置時的模型輸入
+
+# ── 位置：以臉為基準點 ──
+FACE_LIP_TOP = 0                   # 上唇外緣（量臉高用：雙眼連線到上唇，張嘴時也穩定）
+POS_DIM  = 8                       # 儲存：左腕 xy、右腕 xy、鼻尖 xy、臉寬、臉高
+LOC_DIM  = 6                       # 模型用：左腕相對臉 xy、右腕相對臉 xy、頭部移動 xy
+LOC_SCALE = 4.0                    # 手在胸前約離鼻尖 4~5 個臉高，除以 4 讓數值落在 ±1.5 左右
+FEAT_DIM = BASE_DIM + POS_DIM      # 170：現行儲存格式
+VALID_DIMS = (HANDS_DIM, BASE_DIM, FEAT_DIM)   # 可接受的 .npy 寬度（新舊格式）
+
+
+def model_dim(use_loc):
+    """模型輸入維度：啟用位置 168，否則 162（與舊模型相同）。"""
+    return BASE_DIM + (LOC_DIM if use_loc else 0)
+
+
+# ── 動作門檻：推理時手幾乎不動就不預測，避免把「手舉著沒在比」猜成某個詞 ──
+# 但有些手勢本來就幾乎靜止（誰：拇指貼臉頰），全部詞用同一個門檻會把它們擋掉
+# （實測「誰」72% 的真實樣本低於 0.003）。所以每個詞另有門檻：
+#   該詞訓練資料第 MOTION_PCT 百分位的動作量，且不超過全域門檻。
+# 動態的詞第 5 百分位本來就 > 0.003 → 維持 0.003，行為不變；只有靜態的詞會放寬。
+MOTION_THRESH = 0.003
+MOTION_PCT    = 5
+
+
+def hand_motion(arr):
+    """手部動作量：raw 手部 126 維逐維標準差的平均（臉部表情、位置不算）。"""
+    arr = np.asarray(arr, dtype=np.float32)
+    return float(np.std(arr[:, :HANDS_DIM], axis=0).mean())
+
+
+def class_motion_thresholds(motions_by_class, base=MOTION_THRESH, pct=MOTION_PCT):
+    """{詞: [各樣本動作量]} → {詞: 門檻}；門檻 = min(base, 第 pct 百分位)。"""
+    return {c: min(base, float(np.percentile(m, pct)))
+            for c, m in motions_by_class.items() if len(m)}
+
+# ── MediaPipe 參數：收集與推理必須一致，否則偵測行為不同 → 訓練/推理資料分佈不同 ──
+# （只是 dict，本模組不 import mediapipe，訓練端仍不需要裝 mediapipe）
+MP_HANDS_KWARGS = dict(static_image_mode=False, max_num_hands=2,
+                       min_detection_confidence=0.7, min_tracking_confidence=0.5)
+MP_FACE_KWARGS  = dict(static_image_mode=False, max_num_faces=1, refine_landmarks=False,
+                       min_detection_confidence=0.5, min_tracking_confidence=0.5)
+
+# ── 手部軌跡濾波：MediaPipe 逐幀偵測會有雜訊 ──
+# 實測既有資料：12% 樣本有幽靈手、21% 有短暫掉手、6% 左右手跳槽。
+# 調閾值只能此消彼長（提高 → 幽靈少但掉手多），改用時間軸濾波一次處理。
+GHOST_MAX = 2   # 某隻手只出現 ≤ 這麼多幀就消失 → 幽靈手（誤偵測臉/背景），移除
+GAP_MAX   = 2   # 手在中間消失 ≤ 這麼多幀又出現 → 掉幀，用前後內插補回
+
+
+def _hand_slots(results):
+    """MediaPipe Hands 結果 → [("Left"|"Right", hand_landmarks), ...]。
+
+    手部特徵與手腕座標都用這裡的分配，確保同一隻手落在同一槽。
+    """
+    if not (results.multi_hand_landmarks and results.multi_handedness):
+        return []
+    hands = [(hd.classification[0].label, lms)
+             for lms, hd in zip(results.multi_hand_landmarks, results.multi_handedness)]
+
+    # 兩隻手被標成同一邊時，原本後者會直接覆蓋前者 → 一隻手的資料憑空消失。
+    # 改依手腕水平位置分配：畫面已鏡像翻轉，使用者的左手在畫面左側（x 較小）。
+    if len(hands) == 2 and hands[0][0] == hands[1][0]:
+        hands.sort(key=lambda h: h[1].landmark[0].x)
+        hands = [("Left", hands[0][1]), ("Right", hands[1][1])]
+    return hands
 
 
 def extract_two_hands(results):
@@ -40,18 +110,15 @@ def extract_two_hands(results):
     """
     left  = [0.0] * HAND_DIM
     right = [0.0] * HAND_DIM
-    if results.multi_hand_landmarks and results.multi_handedness:
-        for hand_lms, handedness in zip(results.multi_hand_landmarks,
-                                        results.multi_handedness):
-            lbl   = handedness.classification[0].label
-            wrist = hand_lms.landmark[0]
-            feat  = []
-            for lm in hand_lms.landmark:
-                feat += [lm.x - wrist.x, lm.y - wrist.y, lm.z - wrist.z]
-            if lbl == "Left":
-                left = feat
-            else:
-                right = feat
+    for lbl, hand_lms in _hand_slots(results):
+        wrist = hand_lms.landmark[0]
+        feat  = []
+        for lm in hand_lms.landmark:
+            feat += [lm.x - wrist.x, lm.y - wrist.y, lm.z - wrist.z]
+        if lbl == "Left":
+            left = feat
+        else:
+            right = feat
     return left + right
 
 
@@ -72,13 +139,35 @@ def extract_face(results):
     return out
 
 
+def extract_position(hands_results, face_results):
+    """抽出 raw 位置 (8,)：左腕 xy、右腕 xy、鼻尖 xy（畫面座標 0~1）、臉寬、臉高。
+
+    沒偵測到的手 / 臉對應欄位填 0。臉寬 = 兩眼外角水平距離，臉高 = 雙眼連線到上唇的垂直距離；
+    x、y 各用自己方向的臉部尺寸當單位，不受鏡頭長寬比（16:9 / 4:3）影響。
+    """
+    pos = [0.0] * POS_DIM
+    for lbl, hand_lms in _hand_slots(hands_results):
+        wrist = hand_lms.landmark[0]
+        off = 0 if lbl == "Left" else 2
+        pos[off:off + 2] = [wrist.x, wrist.y]
+    lms = getattr(face_results, "multi_face_landmarks", None)
+    if lms:
+        face = lms[0].landmark
+        eye_l, eye_r = face[FACE_POINTS[FACE_EYE_L]], face[FACE_POINTS[FACE_EYE_R]]
+        pos[4:6] = [face[FACE_ORIGIN].x, face[FACE_ORIGIN].y]
+        pos[6] = abs(eye_r.x - eye_l.x)
+        pos[7] = abs(face[FACE_LIP_TOP].y - (eye_l.y + eye_r.y) / 2)
+    return pos
+
+
 def extract_features(hands_results, face_results):
-    """組合雙手 + 臉部 → 162 維 raw 特徵。"""
-    return extract_two_hands(hands_results) + extract_face(face_results)
+    """組合雙手 + 臉部 + 位置 → 170 維 raw 特徵。"""
+    return (extract_two_hands(hands_results) + extract_face(face_results)
+            + extract_position(hands_results, face_results))
 
 
 def pad_features(seq):
-    """把舊的 126 維序列在臉部補 0，補到 FEAT_DIM(162)。已是 162 則原樣回傳。"""
+    """把舊格式（126 / 162 維）序列補 0 到 FEAT_DIM(170)。已是 170 則原樣回傳。"""
     seq = np.asarray(seq, dtype=np.float32)
     if seq.shape[-1] >= FEAT_DIM:
         return seq
@@ -86,10 +175,90 @@ def pad_features(seq):
     return np.concatenate([seq, pad], axis=1)
 
 
-def normalize_sequence(seq):
-    """尺度正規化：手部除以手大小、臉部除以雙眼外角距離，消除離鏡頭遠近影響。
+def _runs(mask):
+    """把布林序列切成連續區段 → [(值, 起點, 長度), ...]。"""
+    out, i, n = [], 0, len(mask)
+    while i < n:
+        j = i
+        while j < n and mask[j] == mask[i]:
+            j += 1
+        out.append((bool(mask[i]), i, j - i))
+        i = j
+    return out
 
-    seq: (T, 162) raw 特徵（若傳入 126 維會先補 0）→ 回傳 (T, 162)。
+
+def _hand_cols(k):
+    """第 k 隻手（0=左、1=右）在 170 維中的欄位：手部 63 維 + 手腕座標 2 維。
+
+    手腕座標與手部特徵必須一起補幀 / 清除，否則會出現「沒有手卻有位置」。
+    """
+    return np.r_[k * HAND_DIM:(k + 1) * HAND_DIM, BASE_DIM + 2 * k:BASE_DIM + 2 * k + 2]
+
+
+def clean_hand_tracks(seq, ghost_max=GHOST_MAX, gap_max=GAP_MAX):
+    """清掉手部偵測雜訊，回傳新陣列（不改原資料）。
+
+    對左右手各自處理（手部特徵與該手的手腕座標同步）：
+      1. 補掉幀：中間缺 ≤ gap_max 幀、前後都有手 → 線性內插補回
+      2. 去幽靈：只出現 ≤ ghost_max 幀的片段 → 清零
+    左右手跳槽（同一隻手短暫跑到另一槽）會同時被這兩步修好：
+    原槽的缺口被補回，另一槽的短暫出現被清掉。
+
+    先補再去：若先去幽靈，斷斷續續的真實手（有 1 有 0 交錯）會被誤刪成大洞補不回來。
+    頭尾的缺手不補（手本來就可能還沒進畫面 / 已經離開）。
+    """
+    seq = pad_features(seq).copy()
+    for k in (0, 1):
+        cols    = _hand_cols(k)
+        block   = seq[:, cols]                              # 花式索引是複本，最後寫回
+        present = np.abs(block[:, :HAND_DIM]).sum(1) > 1e-6  # 有沒有手只看手部特徵
+
+        rs = _runs(present)
+        for i_run, (v, st, ln) in enumerate(rs):
+            if not v and ln <= gap_max and 0 < i_run < len(rs) - 1:
+                a, b = block[st - 1].copy(), block[st + ln].copy()
+                for i in range(ln):
+                    w = (i + 1) / (ln + 1)
+                    block[st + i] = a * (1 - w) + b * w
+                present[st:st + ln] = True
+
+        rs = _runs(present)
+        if len(rs) > 1:                                      # 整段都有手就不是幽靈
+            for v, st, ln in rs:
+                if v and ln <= ghost_max:
+                    block[st:st + ln] = 0.0
+        seq[:, cols] = block
+    return seq
+
+
+def zero_face(arr):
+    """把臉部表情維度清零，形狀不變（位置區塊不受影響）。
+
+    臉部覆蓋率不足時（只有少數詞有臉），「有沒有臉」會洩漏類別資訊，
+    模型會靠它作弊。一致地把所有樣本的臉部清零，臉部就不帶任何資訊，
+    等於純手部模型，但架構與檔案格式不用改。
+    推理端必須做同樣處理才會一致（見 model.pkl 的 use_face 旗標）。
+    位置只用到鼻尖與臉的寬高，存在位置區塊，停用臉部表情不影響位置。
+    """
+    arr = np.asarray(arr, dtype=np.float32).copy()
+    if arr.shape[-1] > HANDS_DIM:
+        arr[..., HANDS_DIM:BASE_DIM] = 0.0
+    return arr
+
+
+def zero_loc(arr):
+    """把位置區塊清零，形狀不變。用途與 zero_face 相同：位置覆蓋率不足時避免洩漏類別。"""
+    arr = np.asarray(arr, dtype=np.float32).copy()
+    if arr.shape[-1] > BASE_DIM:
+        arr[..., BASE_DIM:] = 0.0
+    return arr
+
+
+def normalize_sequence(seq):
+    """尺度正規化：手部除以手大小、臉部除以雙眼外角距離，消除離鏡頭遠近影響；
+    位置換算成「相對鼻尖、以臉的寬高為單位」（見 _normalize_position）。
+
+    seq: (T, 170) raw 特徵（126 / 162 維會先補 0）→ 回傳 (T, 170)。
     沒偵測到的手/臉（全 0）維持 0。
     """
     seq = pad_features(seq)
@@ -107,38 +276,77 @@ def normalize_sequence(seq):
                                               out[:, off:off + HAND_DIM])
 
     # 臉部：除以雙眼外角距離（inter-ocular distance），對頭部大小/遠近不變
-    face    = out[:, HANDS_DIM:].reshape(T, len(FACE_POINTS), 2)
+    face    = out[:, HANDS_DIM:BASE_DIM].reshape(T, len(FACE_POINTS), 2)
     present = np.abs(face).reshape(T, -1).sum(1) > 1e-6
     iod   = np.sqrt(((face[:, FACE_EYE_L] - face[:, FACE_EYE_R]) ** 2).sum(1))  # (T,)
     safe  = np.where(iod > 1e-6, iod, 1.0)
     normed = (face / safe[:, None, None]).reshape(T, FACE_DIM)
-    out[:, HANDS_DIM:] = np.where(present[:, None], normed, out[:, HANDS_DIM:])
+    out[:, HANDS_DIM:BASE_DIM] = np.where(present[:, None], normed, out[:, HANDS_DIM:BASE_DIM])
 
+    out[:, BASE_DIM:] = _normalize_position(seq[:, BASE_DIM:])
     return out
 
 
+def _normalize_position(pos):
+    """raw 位置 (T, 8) → (T, 8)：[左腕 xy, 右腕 xy, 頭部移動 xy, 0, 0]。
+
+    手腕：(手腕 − 鼻尖) ÷ 臉寬/臉高 ÷ LOC_SCALE → 手在身體哪裡（額頭、下巴、胸前…）與移動軌跡。
+    頭部移動：鼻尖相對本段平均位置 ÷ 臉寬/臉高 → 點頭、搖頭。
+    臉短暫消失（多半是被手擋住）的幀，用最近一幀有臉的鼻尖補：頭在 1 秒內幾乎不動，
+    手的位置照常可用。臉寬高取整段中位數，比逐幀穩定。整段都沒臉 → 全 0（位置未知）。
+    """
+    T = len(pos)
+    out = np.zeros((T, POS_DIM), dtype=np.float32)
+    nose, size = pos[:, 4:6], pos[:, 6:8]
+    face_ok = (np.abs(nose).sum(1) > 1e-6) & (size > 1e-6).all(1)
+    if not face_ok.any():
+        return out
+    idx     = np.flatnonzero(face_ok)
+    nearest = idx[np.abs(np.arange(T)[:, None] - idx[None, :]).argmin(1)]
+    nose_f  = nose[nearest]
+    unit    = np.median(size[face_ok], axis=0)
+    for k in (0, 1):
+        wrist   = pos[:, 2 * k:2 * k + 2]
+        present = np.abs(wrist).sum(1) > 1e-6
+        rel     = (wrist - nose_f) / unit / LOC_SCALE
+        out[:, 2 * k:2 * k + 2] = np.where(present[:, None], rel, 0.0)
+    out[:, 4:6] = (nose_f - nose[face_ok].mean(0)) / unit
+    return out
+
+
+def to_model_input(seq, use_loc=False):
+    """raw 特徵 → 模型輸入 (T, model_dim(use_loc))。訓練與推理共用這個入口。
+
+    未啟用位置時只取前 162 維，與加入位置前的模型完全相同（舊 model.pkl 可直接用）。
+    """
+    return normalize_sequence(seq)[:, :model_dim(use_loc)]
+
+
 def _time_warp(seq, rng):
-    """時間軸隨機伸縮，模擬手勢速度快慢。"""
+    """時間軸隨機伸縮，模擬手勢速度快慢。
+
+    手部、臉部線性內插；位置（畫面座標）改取最近幀：有手幀和沒手幀（0）之間內插，
+    會憑空生出「手在畫面左上角」的假位置。
+    """
     T = len(seq)
     speed   = rng.uniform(0.85, 1.15)
     new_idx = np.clip(np.linspace(0, T - 1, T) / speed, 0, T - 1)
     base    = np.arange(T)
-    return np.stack(
-        [np.interp(new_idx, base, seq[:, c]) for c in range(seq.shape[1])],
-        axis=1
-    ).astype(np.float32)
+    smooth  = np.stack([np.interp(new_idx, base, seq[:, c]) for c in range(BASE_DIM)], axis=1)
+    nearest = seq[np.rint(new_idx).astype(int), BASE_DIM:]
+    return np.concatenate([smooth, nearest], axis=1).astype(np.float32)
 
 
 def augment_sequence(seq, rng):
-    """訓練用資料增強：時間伸縮 + 平面旋轉 + 微抖動 + 隨機掉手/掉臉。
+    """訓練用資料增強：時間伸縮 + 平面旋轉 + 微抖動 + 隨機掉手/掉臉/掉位置基準。
 
     所有增強都在 raw 特徵上做，之後再 normalize_sequence。
-    輸入若為 126 維（舊資料）會先補 0 到 162。
+    輸入若為 126 / 162 維（舊資料）會先補 0 到 170。
     """
     seq = _time_warp(pad_features(seq), rng)
     T   = len(seq)
 
-    # 平面旋轉（模擬攝影機/頭部些微傾斜），手與臉同角度
+    # 平面旋轉（模擬攝影機/頭部些微傾斜），手、臉、位置同角度
     ang  = rng.uniform(-0.20, 0.20)            # 約 ±11 度
     c, s = np.cos(ang), np.sin(ang)
     hands = seq[:, :HANDS_DIM].reshape(T, 2, 21, 3)
@@ -146,29 +354,46 @@ def augment_sequence(seq, rng):
     hy = hands[..., 0] * s + hands[..., 1] * c
     hands[..., 0], hands[..., 1] = hx, hy
     seq[:, :HANDS_DIM] = hands.reshape(T, HANDS_DIM)
-    face = seq[:, HANDS_DIM:].reshape(T, len(FACE_POINTS), 2)
+    face = seq[:, HANDS_DIM:BASE_DIM].reshape(T, len(FACE_POINTS), 2)
     fx = face[..., 0] * c - face[..., 1] * s
     fy = face[..., 0] * s + face[..., 1] * c
     face[..., 0], face[..., 1] = fx, fy
-    seq[:, HANDS_DIM:] = face.reshape(T, FACE_DIM)
+    seq[:, HANDS_DIM:BASE_DIM] = face.reshape(T, FACE_DIM)
+    # 手腕、鼻尖繞畫面中心轉（手相對臉的位置跟著轉，等同鏡頭歪斜）；沒偵測到的維持 0
+    for off in (0, 2, 4):
+        p = seq[:, BASE_DIM + off:BASE_DIM + off + 2]
+        present = np.abs(p).sum(1) > 1e-6
+        dx, dy = p[:, 0] - 0.5, p[:, 1] - 0.5
+        p[:, 0] = np.where(present, 0.5 + dx * c - dy * s, 0.0)
+        p[:, 1] = np.where(present, 0.5 + dx * s + dy * c, 0.0)
 
     # 高斯抖動，只加在有偵測到的部分（避免把空手/空臉攪成雜訊）
     noise = rng.normal(0, 0.008, seq.shape).astype(np.float32)
     for off in (0, HAND_DIM):
         present = (np.abs(seq[:, off:off + HAND_DIM]).sum(1, keepdims=True) > 1e-6)
         seq[:, off:off + HAND_DIM] += noise[:, off:off + HAND_DIM] * present
-    fpresent = (np.abs(seq[:, HANDS_DIM:]).sum(1, keepdims=True) > 1e-6)
-    seq[:, HANDS_DIM:] += noise[:, HANDS_DIM:] * fpresent
+    fpresent = (np.abs(seq[:, HANDS_DIM:BASE_DIM]).sum(1, keepdims=True) > 1e-6)
+    seq[:, HANDS_DIM:BASE_DIM] += noise[:, HANDS_DIM:BASE_DIM] * fpresent
+    # 位置是畫面座標，抖動小一點（0.003 ≈ 2 像素）；臉寬高不抖
+    for off in (0, 2, 4):
+        sl = slice(BASE_DIM + off, BASE_DIM + off + 2)
+        present = np.abs(seq[:, sl]).sum(1, keepdims=True) > 1e-6
+        seq[:, sl] += noise[:, sl] * (0.003 / 0.008) * present
 
-    # 隨機掉手：把某一隻手在一段連續幀清零，模擬即時偵測掉手
+    # 隨機掉手：把某一隻手（連同手腕座標）在一段連續幀清零，模擬即時偵測掉手
     if rng.random() < 0.20:
-        off  = int(rng.integers(0, 2)) * HAND_DIM
+        k    = int(rng.integers(0, 2))
         span = int(T * rng.uniform(0.2, 0.6))
         start = int(rng.integers(0, max(1, T - span + 1)))
-        seq[start:start + span, off:off + HAND_DIM] = 0.0
+        seq[start:start + span, _hand_cols(k)] = 0.0
 
     # 隨機掉臉：整段清零，模擬臉沒入鏡/偵測失敗，也讓模型相容臉部補 0 的舊資料
     if rng.random() < 0.25:
-        seq[:, HANDS_DIM:] = 0.0
+        seq[:, HANDS_DIM:BASE_DIM] = 0.0
+
+    # 隨機掉位置基準：整段鼻尖與臉寬高清零 → 位置特徵全 0，
+    # 讓啟用位置的模型在臉沒入鏡時仍能只靠手形判斷（與掉臉分開，互不影響）
+    if rng.random() < 0.10:
+        seq[:, BASE_DIM + 4:] = 0.0
 
     return seq.astype(np.float32)

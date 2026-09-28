@@ -1,0 +1,10 @@
+# Windows 批次檔必須是 CRLF：cmd 遇到 LF 行尾可能找不到 goto 標籤、解析錯亂
+*.bat     text eol=crlf
+*.cmd     text eol=crlf
+# Mac / Linux 腳本必須是 LF，否則會出現 "\r: command not found"
+*.command text eol=lf
+*.sh      text eol=lf
+# 資料與模型是二進位：明確標示，避免 Windows 的換行自動轉換把檔案弄壞
+*.npy     binary
+*.pkl     binary
+*.task    binary
