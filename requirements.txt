@@ -1,7 +1,11 @@
 # 核心：收集 / 訓練 / 測試（版本限制與原因見 requirements-core.txt）
 -r requirements-core.txt
 
-# 翻譯網頁 app.py
+# 翻譯網頁 web.py（FastAPI + MJPEG 串流，建議用這個）
+fastapi>=0.110
+uvicorn>=0.27
+
+# 翻譯網頁 app.py（舊版 Streamlit，保留備用）
 streamlit>=1.35.0
 matplotlib>=3.7.0
 gtts>=2.5.0

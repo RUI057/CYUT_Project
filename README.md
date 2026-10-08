@@ -18,16 +18,17 @@
 
 ```
 CYUT_MDFK/
-├── 開始.command / 開始.bat   雙擊開啟操作選單（Mac / Windows）
+├── 開始.command              組長（Mac）雙擊開啟操作選單：收集＋訓練
 ├── start.py                  操作選單：收集 / 訓練 / 測試 / 查看進度 / 資料健檢
-├── setup_env.py              Windows 一鍵建立專用環境（由 開始.bat 呼叫）
-├── app.py                    網頁即時翻譯
+├── setup_env.py              組員收集包的 Windows 環境設定（由收集包的 開始.bat 呼叫）
+├── web.py                    網頁即時翻譯（FastAPI + MJPEG 串流，建議）
+├── app.py                    網頁即時翻譯（舊版 Streamlit，保留備用）
 ├── collect_data.py           收集訓練資料
 ├── train_model.py            LSTM 模型訓練（交叉驗證報告存到 data/model_report.txt）
 ├── test_model.py             實時識別測試
 ├── check_dataset.py          資料品質健檢
 ├── compare_models.py         LSTM vs ST-GCN A/B 比較
-├── make_collect_kit.py       產生給組員的「手語收集包」
+├── make_collect_kit.py       產生給組員（Windows，只收集）的「手語收集包」，內含 開始.bat
 ├── merge_data.py             合併組員傳回的資料
 ├── requirements.txt          Python 依賴（含翻譯網頁）
 ├── requirements-core.txt     收集 / 訓練 / 測試的核心依賴與版本限制
@@ -69,6 +70,24 @@ python collect_data.py
 - S: 暫停 / 繼續偵測（切換詞彙時會自動暫停，避免誤觸）
 - Q: 離開
 
+### 合併組員的資料
+
+```bash
+python merge_data.py 手語資料_小明_20260920.zip        # 收集包「打包資料」產生的 zip
+python merge_data.py ~/Downloads/dynamic_dataset       # 組員直接給的資料夾也可以
+python merge_data.py 資料夾/ 某人.zip                   # 混著給、一次多個都行
+python merge_data.py <來源> --dry-run                   # 只列出會加什麼，不寫入
+```
+
+- **同名檔案一律跳過、絕不覆蓋**，所以同一份來源合併兩次也不會出事
+- 詞不在詞彙表、檔案讀不了或形狀不對 → 跳過並列出
+- 來源與目的地互相包含時會擋下來（避免自己合併自己）
+
+> ⚠️ 不要用 Finder／檔案總管直接把資料夾拖過去：跳出「取代」時按下去，
+> 會把整個詞資料夾換掉，原本的資料就沒了。
+
+合併完建議先跑 `python check_dataset.py` 檢查品質，再訓練。
+
 ### 模型訓練
 
 ```bash
@@ -98,13 +117,28 @@ python test_model.py
 ### 網頁即時翻譯
 
 ```bash
-streamlit run app.py
+python web.py                      # 預設 http://127.0.0.1:8000
+python web.py --port 9000 --host 0.0.0.0   # 讓同網段的手機/平板也能看
 ```
 
-1. 對著鏡頭比手語，系統即時辨識並累積詞彙
+1. 按「啟動攝影機」，對著鏡頭比手語，系統即時辨識並累積詞彙
 2. 手離開畫面（停頓）→ 自動將詞彙序列交給本機語言模型轉成自然中文句子（句子下方會標示由哪個後端產生）
 3. gTTS 朗讀句子，並保存到翻譯紀錄
-4. 也可手動按「翻譯 / 朗讀 / 清除」，左側側邊欄可調信心門檻與確認幀數
+4. 也可手動按「翻譯 / 朗讀 / 清除」，右側可調信心門檻、確認幀數與自動翻譯停頓
+
+**為什麼用 FastAPI + MJPEG**：Streamlit 的執行模型是「整頁重跑」，推即時影像得靠一個不會結束的
+迴圈撐著，按鈕和設定都要跟這個迴圈搶執行權。`web.py` 把職責切開：
+
+- 擷取執行緒獨佔攝影機與 MediaPipe（兩者都不是執行緒安全的），負責辨識與 JPEG 編碼
+- `/stream` 以 `multipart/x-mixed-replace` 把**同一份** JPEG 丟給所有連線，不是每個連線各編一次
+- 翻譯／TTS 另開執行緒：本機語言模型很慢，不能卡住影像串流或事件迴圈
+- 其他端點（`/state`、`/translate`、`/clear`、`/settings`）隨時可用，不受影像迴圈影響
+
+> macOS 注意：攝影機授權請求只能在主執行緒發出，`web.py` 啟動時會先在主執行緒開一次攝影機
+> 觸發授權視窗。若第一次使用沒跳出視窗又開不起來，到「系統設定 → 隱私權與安全性 → 攝影機」
+> 手動允許終端機。
+
+舊版 Streamlit 介面仍可用：`streamlit run app.py`。
 
 ## 環境要求
 
@@ -176,7 +210,8 @@ vocabulary.json 定義所有可識別的詞彙，修改后需重新收集數據�
 
 ## 詞彙列表
 
-詞彙表共 186 個詞（`data/vocabulary.json`），截至 2026-09 已收集並訓練其中 90 個。
+詞彙表共 114 個詞（`data/vocabulary.json`），著重日常使用、問問題、數字與學校（朝陽科大校園），截至 2026-10 其中 71 個已有資料。
+「問路」「問問題」這類片語不另設一個詞，而是分別辨識「問＋路」「問＋問題」，再由語義修正組回完整句子（一筆錄製只有 30 幀，約 1 秒，比不完兩個手勢）。
 收集進度可用 `python start.py` →「查看進度」查看。
 
 ## 依賴包
@@ -196,7 +231,9 @@ vocabulary.json 定義所有可識別的詞彙，修改后需重新收集數據�
 | pandas | 數據處理 |
 | pillow | 圖像操作 |
 | python-dotenv | 環境變量管理 |
-| streamlit | 網頁即時翻譯介面 |
+| fastapi | 網頁即時翻譯後端（web.py） |
+| uvicorn | ASGI 伺服器（web.py） |
+| streamlit | 舊版網頁介面（app.py，保留備用） |
 
 ## 使用建議
 
@@ -223,7 +260,7 @@ vocabulary.json 定義所有可識別的詞彙，修改后需重新收集數據�
 
 ## 未來計劃
 
-- 擴展詞彙數量（目前 90 / 186 詞有資料）
+- 補齊詞彙資料（目前 71 / 114 詞有資料）
 - 用新版收集程式補收含位置資料，啟用位置特徵（`train_model.py --loc`）
 - 全身姿勢識別支持
 - 離線語音朗讀（目前 gTTS 需要網路，其餘流程已可離線）

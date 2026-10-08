@@ -5,12 +5,15 @@
 會自動檢查並安裝各功能需要的套件。
 
 使用方式：
-  - 雙擊「開始.command」(Mac) 或「開始.bat」(Windows)
+  - 組長（Mac，收集＋訓練）：主專案雙擊「開始.command」
+  - 組員（Windows，只收集）：收集包雙擊「開始.bat」
   - 或終端機執行： python start.py
 """
 import os
 import re
 import subprocess
+import threading
+import webbrowser
 import sys
 from collections import Counter
 from pathlib import Path
@@ -44,6 +47,9 @@ PKG_COLLECT = [("cv2", _SPECS.get("opencv-python", "")), ("mediapipe", _SPECS.ge
                ("PIL", _SPECS.get("pillow", "")), ("numpy", _SPECS.get("numpy", ""))]
 PKG_TRAIN   = [("numpy", _SPECS.get("numpy", "")), ("torch", _SPECS.get("torch", "")),
                ("sklearn", _SPECS.get("scikit-learn", ""))]
+# 網頁另外需要 FastAPI 與 ASGI 伺服器（攝影機與模型的部分與「測試辨識」相同）
+PKG_WEB     = [("fastapi", _SPECS.get("fastapi", "fastapi>=0.110")),
+               ("uvicorn", _SPECS.get("uvicorn", "uvicorn>=0.27"))]
 
 # 在獨立 process 檢查套件：避免本程式已載入的舊模組干擾判斷，裝完後也能反映新版本
 _CHECK_CODE = r"""
@@ -299,6 +305,29 @@ def do_test():
     subprocess.call([sys.executable, "test_model.py"])
 
 
+def do_web(port=8000):
+    """開啟翻譯網頁（FastAPI + MJPEG）。伺服器會一直跑，按 Ctrl+C 回到選單。"""
+    if not ensure_packages(PKG_COLLECT + PKG_TRAIN + PKG_WEB, "翻譯網頁"):
+        return
+    if not (ROOT / "data" / "model.pkl").exists():
+        print("\n❌ 找不到 data/model.pkl，請先選 2 訓練模型。")
+        return
+    url = f"http://127.0.0.1:{port}"
+    title("即將開啟翻譯網頁")
+    print(f"  網址：{url}（等一下會自動用瀏覽器打開）")
+    print("  在網頁上按「啟動攝影機」開始辨識，比完一段手語後手離開畫面即自動翻譯。")
+    print("\n  伺服器會持續執行，要回到選單請在這個視窗按 Ctrl+C。")
+    if not ask_yes("\n準備好了嗎？"):
+        return
+    # 伺服器要先起來才連得上；開瀏覽器的動作丟到背景延遲執行
+    threading.Timer(2.0, lambda: webbrowser.open(url)).start()
+    try:
+        subprocess.call([sys.executable, "web.py", "--port", str(port)])
+    except KeyboardInterrupt:
+        pass
+    print("\n網頁伺服器已關閉。")
+
+
 def do_check():
     if not ensure_packages([("numpy", _SPECS.get("numpy", ""))], "檢查資料品質"):
         return
@@ -372,8 +401,9 @@ else:
   1. 收集資料      用攝影機錄製手語動作
   2. 訓練模型      用收集到的資料訓練
   3. 測試辨識      用攝影機測試訓練好的模型
-  4. 查看進度      看哪些詞收了、哪些還沒
-  5. 檢查資料品質  找出錄壞的樣本
+  4. 翻譯網頁      瀏覽器即時辨識＋語義翻譯＋朗讀
+  5. 查看進度      看哪些詞收了、哪些還沒
+  6. 檢查資料品質  找出錄壞的樣本
   0. 離開
 """
 
@@ -395,7 +425,7 @@ def main():
         actions = {"1": do_collect, "2": lambda: show_progress(), "3": do_pack}
     else:
         actions = {"1": do_collect, "2": do_train, "3": do_test,
-                   "4": lambda: show_progress(), "5": do_check}
+                   "4": do_web, "5": lambda: show_progress(), "6": do_check}
 
     while True:
         title(MENU_TITLE)
