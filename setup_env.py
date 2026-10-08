@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """一鍵環境設定：建立專用的 Python 環境、裝好套件，然後開啟操作選單。
 
-由「開始.bat」自動呼叫（Windows），一般不需要手動執行。
-Mac 用「開始.command」，不經過這支程式。
+給 Windows 組員的收集包用：雙擊收集包的「開始.bat」會呼叫本程式。
+組長用 Mac（主專案雙擊「開始.command」），不經過這支程式；它放在主專案只是收集包的來源。
 
 為什麼要專用環境，而不是直接裝進電腦上的 Python：
   - mediapipe 在 Windows 上，安裝路徑有中文（例如使用者名稱是中文）就讀不到模型檔
@@ -206,7 +206,7 @@ def diagnose(err, prefix):
                           "requirements-core.txt 的 mediapipe 版本限制可能被改掉了，請通知組長。")
     if not str(prefix).isascii():
         return SetupError("Python 環境的路徑含有中文，mediapipe 讀不到模型檔。",
-                          f"刪除 {prefix} 後，把專案搬到純英文路徑（例如 C:\\CYUT_Project）再雙擊「開始.bat」。")
+                          f"刪除 {prefix} 後，把專案搬到純英文路徑（例如 C:\\CYUT_Project）再重新雙擊「開始.bat」。")
     return SetupError("自我檢查失敗。", "把上面的錯誤訊息截圖傳給組長。")
 
 
@@ -279,7 +279,7 @@ def main():
             say(f"\n👉 {e.hint}")
         return 1
     except KeyboardInterrupt:
-        say("\n已中斷。下次雙擊「開始.bat」會從中斷的地方繼續。")
+        say("\n已中斷。下次重新雙擊「開始.bat」會從中斷的地方繼續。")
         return 1
 
     return subprocess.call([sys.executable, str(ROOT / "start.py")])

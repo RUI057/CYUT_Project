@@ -42,6 +42,14 @@ X, y, groups, classes = load_dataset(min_samples=args.min_samples, use_face=USE_
                                      clean_tracks=CLEAN_TRACKS, use_loc=USE_LOC)
 N_CLASS = len(classes)
 IN_DIM  = model_dim(USE_LOC)
+
+# 每個詞有幾個「錄製組」（同一次錄製為一組，見 trainer.load_dataset）。
+# 只有 1 組的詞在 session-aware 交叉驗證時整組被拿去驗證、訓練沒看過，預測必錯：
+# 這是評估方式的限制，不代表模型壞掉，補收第二次錄製才能評估。
+# 它們不參與準確率、信心門檻校準與誤判詞對的統計，否則必錯的樣本會把信心門檻推到不合理的高。
+n_groups  = np.array([len(set(groups[y == c])) for c in range(N_CLASS)])
+evaluable = n_groups >= 2
+single    = [classes[c] for c in range(N_CLASS) if not evaluable[c]]
 factory = lambda: GestureLSTM(feat_dim=IN_DIM, num_classes=N_CLASS).to(DEVICE)
 
 print(f"\n[模型] LSTM  參數量：{sum(p.numel() for p in factory().parameters()):,}"
@@ -51,6 +59,7 @@ print(f"\n[模型] LSTM  參數量：{sum(p.numel() for p in factory().parameter
 # ── 交叉驗證（誠實準確率）──────────────────────
 cv_mean = cv_std = 0.0
 conf_thr = None
+acc_eval = None
 report = []     # 交叉驗證結果另存成文字檔：規劃要補收 / 重收哪些詞時要看
 if args.quick:
     print("\n[快速模式] 跳過交叉驗證")
@@ -62,18 +71,27 @@ else:
     cv_mean, cv_std = float(np.mean(fold_accs)), float(np.std(fold_accs))
     print(f"\n[交叉驗證結果] {args.folds}-fold 準確率：{cv_mean:.1%} ± {cv_std:.1%}")
 
+    agg_true_a, agg_pred_a = np.asarray(agg_true), np.asarray(agg_pred)
+    keep = evaluable[agg_true_a]                     # 只留「可評估的詞」的驗證樣本
+    acc_eval = float((agg_pred_a[keep] == agg_true_a[keep]).mean())
+    print(f"  排除 {len(single)} 個只有 1 個錄製組、無法評估的詞後（{int(keep.sum())} 筆）：{acc_eval:.1%}")
+
     print("\n[彙整分類報告]（每筆資料各被驗證一次）")
     report += [f"訓練時間：{datetime.now():%Y-%m-%d %H:%M}",
                f"資料：{len(X)} 筆、{N_CLASS} 個詞；輸入 {IN_DIM} 維  臉部：{'啟用' if USE_FACE else '停用'}"
                f"  位置：{'啟用' if USE_LOC else '停用'}",
                f"{args.folds}-fold 交叉驗證準確率：{cv_mean:.1%} ± {cv_std:.1%}"
-               f"（各折 {' '.join(f'{a:.0%}' for a in fold_accs)}）", "",
+               f"（各折 {' '.join(f'{a:.0%}' for a in fold_accs)}）",
+               f"排除 {len(single)} 個只有 1 個錄製組、無法評估的詞後：{acc_eval:.1%}（{int(keep.sum())} 筆）",
+               "無法評估的詞（下方 recall=0.00 是評估限制、不代表壞掉；補收第二次錄製才能評估）："
+               + ("、".join(single) or "無"), "",
                "[各詞分類報告]（recall 低 = 這個詞常認不出來）",
                full_report(agg_true, agg_pred, classes)]
-    report.append(confusion_pairs(agg_true, agg_pred, classes, top=30))
+    report.append("（以下只統計可評估的詞；無法評估的詞預測必錯，列進來會誤導補收方向）")
+    report.append(confusion_pairs(agg_true_a[keep], agg_pred_a[keep], classes, top=30))
 
     # 推理信心門檻：用交叉驗證（模型沒看過的資料）校準，不再寫死
-    conf_thr, cover, prec = trainer.calibrate_conf_thresh(agg_proba, agg_true)
+    conf_thr, cover, prec = trainer.calibrate_conf_thresh(agg_proba[keep], agg_true_a[keep])
     line = (f"[信心門檻] 校準為 {conf_thr:.3f}：{cover:.0%} 的預測會出結果，其中 {prec:.0%} 正確"
             f"（目標 {trainer.CONF_TARGET_PRECISION:.0%}）")
     print("\n" + line)
@@ -102,6 +120,8 @@ payload = {
     "num_layers":  2,
     "cv_acc_mean": cv_mean,
     "cv_acc_std":  cv_std,
+    "cv_acc_evaluable": acc_eval,     # 排除單一錄製組的詞之後的準確率
+    "unevaluable_classes": single,
     "motion_thresh": motion_thr,
     "conf_thresh": conf_thr,          # None（--quick 沒有交叉驗證）→ 推理端用預設值
     "label_smooth": trainer.LABEL_SMOOTH,

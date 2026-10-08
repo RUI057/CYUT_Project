@@ -4,11 +4,12 @@ import mediapipe as mp
 import numpy as np
 import os
 import sys
+import time
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from src.vocab import get_all_labels, get_hint
-from src.features import (extract_features, extract_position, BASE_DIM,
+from src.features import (extract_features, extract_position, longest_hand_gap, BASE_DIM, GAP_MAX,
                           MP_HANDS_KWARGS, MP_FACE_KWARGS)
 from src.video import open_camera, camera_help, disable_ime, read_key
 from collections import Counter, deque
@@ -23,7 +24,7 @@ hands    = mp_hands.Hands(**MP_HANDS_KWARGS)
 # 臉部非手動標記（眉/眼/嘴）；與手部分開跑，手部特徵與舊資料相容
 face     = mp_face.FaceMesh(**MP_FACE_KWARGS)
 
-from src.font_utils import get_font, put_text
+from src.font_utils import get_font, put_texts
 font_large  = get_font(50)
 font_medium = get_font(40)
 font_small  = get_font(40)
@@ -42,7 +43,15 @@ COOLDOWN_FRAMES  = 8   # 每筆錄完後冷卻幾幀
 NO_HAND_GRACE    = 5   # 連續幾幀沒偵測到手才算「手不見」（MediaPipe 偶爾掉 1-2 幀）
 DISPLAY_SMOOTH   = 7   # 畫面顯示的手數取最近幾幀的多數，避免「2 隻手」一閃一閃
 MIN_FACE_PCT     = 0.5 # 一筆裡有臉的幀少於這個比例 → 提醒（位置以臉為基準，沒臉就沒位置）
+LOW_FPS          = 20  # 幀率低於這個就用紅字標示：兩幀之間手移動太遠，快速手勢容易跟丟
 DATA_DIR         = "dynamic_dataset"
+
+# 畫面最上面兩行（詞彙、已收集）用最顯眼的亮色 + 黑色描邊；顏色是 RGB
+LABEL_COLOR      = (255, 230, 0)    # 詞彙：亮黃
+LABEL_REC_COLOR  = (0, 255, 110)    # 詞彙（錄製中）：亮綠
+COUNT_COLOR      = (0, 240, 255)    # 已收集：亮青
+KEYS_COLOR       = (255, 110, 255)  # 下方按鍵提示（N、M、J…）：亮粉紫（黃/青/綠/橘已各有用途）
+OUTLINE          = 3                # 描邊粗細（像素）
 
 # 本次收集的 session 標記，寫進檔名 → 訓練時可做「同次錄製不跨組」的誠實切分
 SESSION = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -83,7 +92,8 @@ recent_hands    = deque(maxlen=DISPLAY_SMOOTH)  # 最近幾幀偵測到的手數
 countdown_count = 0
 cooldown_count  = 0
 paused          = False
-face_warn       = ""                         # 上一筆臉入鏡不足的提醒（顯示在畫面上）
+sample_warn     = ""                         # 上一筆的品質提醒：臉入鏡不足、手中途跟丟（顯示在畫面上）
+frame_times     = deque(maxlen=30)           # 最近 30 幀的時間，算實際幀率
 print(f"[Session] {SESSION}")
 
 print("\nN=下一個  M=上一個  J=跳到指定詞彙  D=刪除上一個  S=暫停/繼續  Q=離開")
@@ -93,6 +103,8 @@ while cap.isOpened():
     ret, frame = cap.read()
     if not ret:
         break
+    frame_times.append(time.perf_counter())
+    fps = (len(frame_times) - 1) / (frame_times[-1] - frame_times[0]) if len(frame_times) > 1 else 0.0
     frame   = cv2.flip(frame, 1)
     rgb     = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     results  = hands.process(rgb)
@@ -166,12 +178,18 @@ while cap.isOpened():
             save_path = os.path.join(DATA_DIR, label, f"{SESSION}_{existing}.npy")
             np.save(save_path, arr)
             existing += 1
-            # 有臉的幀比例（鼻尖有值）：太少代表這筆大多沒有位置資訊
+            # 品質檢查：有臉的幀太少 → 缺位置資訊；手中途跟丟太久 → 濾波補不回來
             face_pct = float((np.abs(arr[:, BASE_DIM + 4:BASE_DIM + 6]).sum(1) > 1e-6).mean())
-            face_warn = "" if face_pct >= MIN_FACE_PCT else \
-                f"上一筆只有 {face_pct:.0%} 的幀有臉 → 缺位置資訊，可按 D 刪除重錄"
+            gap = longest_hand_gap(arr)
+            if gap > GAP_MAX:
+                sample_warn = (f"上一筆手連續 {gap} 幀沒抓到（動作太快或光線不足）"
+                               f"→ 可按 D 刪除重錄，放慢一點或把燈打亮")
+            elif face_pct < MIN_FACE_PCT:
+                sample_warn = f"上一筆只有 {face_pct:.0%} 的幀有臉 → 缺位置資訊，可按 D 刪除重錄"
+            else:
+                sample_warn = ""
             print(f"[儲存] {label}  {existing}/{SAMPLES_PER_CLASS}"
-                  + (f"  ⚠️ {face_warn}" if face_warn else ""))
+                  + (f"  ⚠️ {sample_warn}" if sample_warn else ""))
             state          = "cooldown"
             cooldown_count = COOLDOWN_FRAMES
             sequence       = []
@@ -181,15 +199,15 @@ while cap.isOpened():
         if cooldown_count <= 0:
             state = "waiting" if existing < SAMPLES_PER_CLASS else "done"
 
-    # ── 畫面顯示 
+    # ── 畫面顯示（中文字先收集起來，最後一次畫完：每段各畫一次會讓幀率掉一半以上）
+    texts = []
     # 詞彙索引與名稱
     idx_text = f"[{current_gesture + 1}/{len(GESTURES)}]"
-    frame = put_text(frame, f"{idx_text} {label}", (10, 10), font_large,
-                     (0, 220, 80) if state == "recording" else (255, 255, 255))
+    texts.append((f"{idx_text} {label}", (10, 10), font_large,
+                  LABEL_REC_COLOR if state == "recording" else LABEL_COLOR, OUTLINE))
 
     # 進度
-    frame = put_text(frame, f"已收集：{existing} / {SAMPLES_PER_CLASS}",
-                     (10, 60), font_medium, (180, 180, 180))
+    texts.append((f"已收集：{existing} / {SAMPLES_PER_CLASS}", (10, 60), font_medium, COUNT_COLOR, OUTLINE))
 
     # 狀態
     state_info = {
@@ -200,8 +218,8 @@ while cap.isOpened():
         "done":      ("此詞彙已完成！按 N 換下一個",                     (0, 220, 80)),
         "paused":    ("暫停偵測，按 S 繼續",                         (220, 180, 0)),
     }
-    frame = put_text(frame, state_info["paused"][0] if paused else state_info[state][0],
-                     (10, 95), font_medium, state_info["paused"][1] if paused else state_info[state][1])
+    msg, color = state_info["paused"] if paused else state_info[state]
+    texts.append((msg, (10, 95), font_medium, color))
 
     # 倒數大數字 3-2-1（置中）
     if state == "countdown":
@@ -213,24 +231,30 @@ while cap.isOpened():
     hand_text  = f"偵測到 {shown_n} 隻手" if shown_n else "未偵測到手"
     hand_text += "  ｜臉：OK  位置：OK" if has_face else "  ｜臉：無  位置：無"
     hand_color = (100, 220, 255) if shown_n else (80, 80, 200)
-    frame = put_text(frame, hand_text, (10, 130), font_small, hand_color)
+    texts.append((hand_text, (10, 130), font_small, hand_color))
+
+    # 實際幀率：太低代表兩幀之間手移動太遠，快速手勢容易跟丟（光線暗時鏡頭也會自動降幀率）
+    fps_low = 0 < fps < LOW_FPS
+    cv2.putText(frame, f"FPS {fps:.0f}" + ("  (low: add light)" if fps_low else ""), (w - 330, 40),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.9, (60, 60, 255) if fps_low else (160, 160, 160), 2)
 
     # 臉沒入鏡提醒：位置以臉為基準，手在畫面但臉不在 → 這段錄到的沒有位置資訊
     if shown_n and not has_face and not paused:
-        frame = put_text(frame, "注意：臉沒入鏡，請讓臉也在畫面內（位置要以臉為基準）",
-                         (10, h - 180), font_small, (255, 70, 70))
-    elif face_warn and not paused:
-        frame = put_text(frame, f"注意：{face_warn}", (10, h - 180), font_small, (255, 170, 0))
+        texts.append(("注意：臉沒入鏡，請讓臉也在畫面內（位置要以臉為基準）",
+                      (10, h - 180), font_small, (255, 70, 70)))
+    elif sample_warn and not paused:
+        texts.append((f"注意：{sample_warn}", (10, h - 180), font_small, (255, 170, 0)))
 
     # 手語提示
     hint_text = get_hint(label)
     if hint_text:
-        frame = put_text(frame, f"提示：{hint_text}", (10, 180), font_large, (0, 0, 220))
+        texts.append((f"提示：{hint_text}", (10, 180), font_large, (0, 0, 220)))
 
     # 操作提示
-    frame = put_text(frame, "N=下一個 M=上一個 J=跳到指定詞 D=刪除上一筆 S=暫停 Q=離開",
-                     (10, h - 90), font_small, (120, 120, 120))
+    texts.append(("N=下一個 M=上一個 J=跳到指定詞 D=刪除上一筆 S=暫停 Q=離開",
+                  (10, h - 90), font_small, KEYS_COLOR, OUTLINE))
 
+    frame = put_texts(frame, texts)
     cv2.imshow("手語資料收集", frame)
     key = read_key()
 
@@ -242,7 +266,7 @@ while cap.isOpened():
         sequence = []
         hold_count = 0
         paused = True  
-        face_warn = ""
+        sample_warn = ""
         print(f"[切換] -> {GESTURES[current_gesture]}")
     elif key == ord('m'):
         current_gesture = (current_gesture - 1) % len(GESTURES)
@@ -250,7 +274,7 @@ while cap.isOpened():
         sequence = []
         hold_count = 0
         paused = True  
-        face_warn = ""
+        sample_warn = ""
         print(f"[切換] -> {GESTURES[current_gesture]}")
     elif key == ord('d'):
         folder = os.path.join(DATA_DIR, label)
@@ -260,7 +284,7 @@ while cap.isOpened():
             samples.sort(key=lambda x: os.path.getmtime(os.path.join(folder, x)))
             last_file = samples[-1]
             os.remove(os.path.join(folder, last_file))
-            face_warn = ""
+            sample_warn = ""
             state = "waiting"
             sequence = []
             hold_count = 0
@@ -291,7 +315,7 @@ while cap.isOpened():
             else:
                 current_gesture = target
                 state, sequence, hold_count = "waiting", [], 0
-                face_warn = ""
+                sample_warn = ""
                 print(f"[切換] -> {GESTURES[current_gesture]}")
         print("─" * 50 + "\n按 S 繼續收集\n")
     elif key == ord('s'):

@@ -195,6 +195,23 @@ def _hand_cols(k):
     return np.r_[k * HAND_DIM:(k + 1) * HAND_DIM, BASE_DIM + 2 * k:BASE_DIM + 2 * k + 2]
 
 
+def longest_hand_gap(seq):
+    """左右手各自「出現過之後又消失、之後再出現」的最長連續缺口幀數，取兩手較大者。
+
+    頭尾沒有手不算（手本來就可能還沒進畫面 / 已經離開）。> GAP_MAX 代表
+    clean_hand_tracks 補不回來，通常是動作太快或光線不足，MediaPipe 跟丟了手。
+    """
+    seq = pad_features(seq)
+    longest = 0
+    for off in (0, HAND_DIM):
+        present = np.abs(seq[:, off:off + HAND_DIM]).sum(1) > 1e-6
+        rs = _runs(present)
+        for k, (v, _st, ln) in enumerate(rs):
+            if not v and 0 < k < len(rs) - 1:
+                longest = max(longest, ln)
+    return longest
+
+
 def clean_hand_tracks(seq, ghost_max=GHOST_MAX, gap_max=GAP_MAX):
     """清掉手部偵測雜訊，回傳新陣列（不改原資料）。
 

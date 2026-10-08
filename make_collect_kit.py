@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
 """產生「手語收集包」：給只負責收集資料的組員，不含訓練、測試與既有資料。
 
+分工：組員用 Windows 只收集（收集包）；組長用 Mac 收集＋訓練（主專案，雙擊開始.command）。
+所以收集包只放 Windows 需要的東西。
+
 用法：python make_collect_kit.py
 產出：手語收集包/（資料夾）與 手語收集包.zip（直接傳給組員）
 
 收集包裡的程式都是「從主專案複製」而不是另外維護一份：特徵抽取（src/features.py）
 只要跟主專案不一致，組員收到的資料就和你的對不上。所以主專案的收集程式、
 features.py、詞彙表或比法提示改過之後，**要重新執行這支程式再發給組員**。
+
+Windows 的「開始.bat」不放在主專案，而是由本程式的 WIN_LAUNCHER 範本寫進收集包
+（要改 Windows 啟動流程就改那段範本）。
 
 收集包的 start.py / setup_env.py 會偵測到沒有 train_model.py，自動變成純收集模式：
 選單只有「收集／查看進度／打包資料」，也不安裝訓練用的 torch、scikit-learn。
@@ -25,7 +31,6 @@ OUT  = ROOT / NAME
 ZIP  = ROOT / f"{NAME}.zip"
 
 COPY = [
-    "開始.bat", "開始.command",          # 雙擊啟動
     "setup_env.py",                      # Windows 自動建環境
     "start.py",                          # 選單（偵測到沒有 train_model.py → 純收集模式）
     "collect_data.py",
@@ -36,6 +41,71 @@ COPY = [
 EXTRA = {
     "data/手語演示網址.txt": "手語演示網址.txt",   # 比法提示大多是空的，看示範影片才知道怎麼比
 }
+# Windows 雙擊啟動器：找相容的 Python（3.9～3.12）→ 執行 setup_env.py；沒有 Python 時可用 winget 自動安裝。
+# 寫入時轉成 CRLF、不加 BOM：cmd 遇到 LF 行尾可能找不到 goto 標籤。
+WIN_LAUNCHER = r'''@echo off
+chcp 65001 >nul
+setlocal
+cd /d "%~dp0"
+title 手語辨識專案
+set "PYTHONUTF8=1"
+set "PYTHONIOENCODING=utf-8"
+
+rem ==============================================================
+rem  Windows 專用：雙擊就會開啟操作選單（收集資料 / 訓練 / 測試）。
+rem  第一次會自動建立專用環境、安裝套件（約 5 到 20 分鐘），之後幾秒就開好。
+rem  設定流程都在 setup_env.py；這裡只負責找到版本相容的 Python。
+rem ==============================================================
+
+set "PY="
+
+rem 1. 已經設定好的專用環境：直接用
+if exist "%PUBLIC%\cyut_venv\Scripts\python.exe" set PY="%PUBLIC%\cyut_venv\Scripts\python.exe"
+if defined PY %PY% -c "import sys" >nul 2>&1 || set "PY="
+if defined PY goto run
+
+rem 2. 找相容的 Python：3.9 到 3.12（3.13 以上 mediapipe 還不支援）
+for %%V in (3.11 3.12 3.10 3.9) do if not defined PY py -%%V -c "import sys" >nul 2>&1 && set "PY=py -%%V"
+if defined PY goto run
+for %%C in (python python3) do if not defined PY %%C -c "import sys; sys.exit(0 if (3,9) <= sys.version_info[:2] <= (3,12) else 1)" >nul 2>&1 && set "PY=%%C"
+if defined PY goto run
+goto nopython
+
+:run
+%PY% setup_env.py
+if errorlevel 1 pause
+goto end
+
+:nopython
+echo.
+echo  [X] 找不到可用的 Python（需要 3.9 到 3.12 版）
+echo.
+echo  目前電腦上裝的 Python：
+py -0 2>nul || echo    （沒有偵測到）
+echo.
+echo  注意：Python 3.13 以上太新，mediapipe 還不支援，請安裝 3.11。
+echo.
+where winget >nul 2>&1 || goto manual
+choice /C YN /M "要現在自動安裝 Python 3.11 嗎"
+if errorlevel 2 goto manual
+winget install -e --id Python.Python.3.11
+echo.
+echo  安裝完成後，請關閉這個視窗，再雙擊一次「開始.bat」。
+pause
+goto end
+
+:manual
+echo  請下載 Python 3.11（頁面往下捲，選 Windows installer 64-bit）：
+echo    https://www.python.org/downloads/release/python-3119/
+echo  安裝時記得勾選「Add python.exe to PATH」，裝完再雙擊一次「開始.bat」。
+start "" "https://www.python.org/downloads/release/python-3119/"
+pause
+goto end
+
+:end
+endlocal
+'''
+
 TRAIN_ONLY = {"torch", "scikit-learn"}   # 收集用不到，省下約 140 MB 下載
 
 GUIDE = """\
@@ -45,10 +115,7 @@ GUIDE = """\
 
 ## 1. 開起來
 
-| 系統 | 做法 |
-|---|---|
-| **Windows** | 雙擊 **`開始.bat`** |
-| **Mac** | 雙擊 **`開始.command`** |
+雙擊 **`開始.bat`** 就會開啟操作選單。
 
 - 需要 **Python 3.9～3.12（建議 3.11）**，**不要裝 3.13 以上**（太新，套件還不支援）。
   Windows 沒有 Python 時，`開始.bat` 會問你要不要自動安裝；
@@ -93,11 +160,8 @@ GUIDE = """\
 ## 常見狀況
 
 - **Windows 跳出「Windows 已保護您的電腦」**：按「其他資訊」→「仍要執行」。
-- **Mac 說無法打開 `開始.command`**：按右鍵 →「打開」；新版 macOS 要到
-  系統設定 → 隱私權與安全性 → 最下面按「仍要打開」。
 - **攝影機打不開／黑畫面**：先關掉其他用到攝影機的程式（視訊會議、LINE、瀏覽器）。
-  - Windows：設定 → 隱私權與安全性 → 相機 → 開啟「讓桌面應用程式存取您的相機」
-  - Mac：系統設定 → 隱私權與安全性 → 攝影機 → 允許「終端機」
+  - 設定 → 隱私權與安全性 → 相機 → 開啟「讓桌面應用程式存取您的相機」
 - **按鍵沒反應**：先用滑鼠點一下攝影機畫面，讓它在最上層。
 - **Windows 出現「缺少 Visual C++」或「DLL load failed」**：
   安裝 https://aka.ms/vs/17/release/vc_redist.x64.exe 後重新開啟。
@@ -166,12 +230,8 @@ def main():
     for rel, name in EXTRA.items():
         shutil.copy2(ROOT / rel, OUT / name)
 
-    # 行尾一定要對：.bat 要 CRLF（否則 cmd 可能找不到 goto 標籤），.command 要 LF 且可執行
-    bat = OUT / "開始.bat"
-    bat.write_bytes(bat.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
-    cmd = OUT / "開始.command"
-    cmd.write_bytes(cmd.read_bytes().replace(b"\r\n", b"\n"))
-    cmd.chmod(0o755)
+    # 行尾一定要是 CRLF（否則 cmd 可能找不到 goto 標籤）、不加 BOM
+    (OUT / "開始.bat").write_bytes(WIN_LAUNCHER.replace("\n", "\r\n").encode("utf-8"))
 
     (OUT / "requirements-core.txt").write_text(kit_requirements(), encoding="utf-8")
     (OUT / "使用說明.md").write_text(GUIDE, encoding="utf-8")
@@ -187,7 +247,7 @@ def main():
     if missing:
         fail("收集包缺少模組（請把它加進 make_collect_kit.py 的 COPY）：\n   " + "\n   ".join(missing))
 
-    # 用 Python 打包：檔名標 UTF-8（中文不亂碼），也保留 .command 的執行權限
+    # 用 Python 打包：檔名標 UTF-8（Windows 解壓縮時中文資料夾名不亂碼）
     ZIP.unlink(missing_ok=True)
     with zipfile.ZipFile(ZIP, "w", zipfile.ZIP_DEFLATED) as z:
         for f in sorted(OUT.rglob("*")):

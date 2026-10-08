@@ -39,4 +39,5 @@ def get_hint(label: str) -> str:
                 _hints_cache = json.load(f)
         except (FileNotFoundError, json.JSONDecodeError):
             _hints_cache = {}
-    return _hints_cache.get(label, "")
+    # 從其他資料貼上的提示常以冒號開頭（「名字：…」只複製到冒號後），畫面會變成「提示：：…」
+    return _hints_cache.get(label, "").strip().lstrip("：:").strip()

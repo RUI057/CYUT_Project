@@ -13,7 +13,7 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)
 os.chdir(ROOT)
 from src import camera
-from src.font_utils import get_font, put_text
+from src.font_utils import get_font, put_texts
 from src.video import open_camera, camera_help, disable_ime, read_key
 
 disable_ime()   # Windows：避免注音輸入法攔截 Q、C 等按鍵（須在開視窗前）
@@ -61,6 +61,7 @@ while True:
         print(f"[確認] {confirmed_word}  {confirmed_conf:.0%}")
 
     # ── 畫面 ──────────────────────────────────
+    texts = []   # 中文字最後一次畫完（每段各畫一次會讓幀率大幅下降，見 font_utils.put_texts）
     buf_pct = state["buffer_pct"]
 
     # Buffer 進度條
@@ -77,28 +78,28 @@ while True:
         cv2.rectangle(frame, (10, h-52), (w-10, h-34), (40, 40, 40), -1)
         pw = int((w-20) * prog / 100)
         cv2.rectangle(frame, (10, h-52), (10+pw, h-34), (0, 200, 160), -1)
-        frame = put_text(frame, f"確認中：{state['confirm_word']} {prog}%",
-                         (15, h-56), font_small, (0, 220, 180))
+        texts.append((f"確認中：{state['confirm_word']} {prog}%",
+                      (15, h-56), font_small, (0, 220, 180)))
 
     if state["cooldown"] > 0:
-        frame = put_text(frame, f"冷卻 {state['cooldown']}",
-                         (10, h-78), font_small, (180, 180, 80))
+        texts.append((f"冷卻 {state['cooldown']}",
+                      (10, h-78), font_small, (180, 180, 80)))
 
     hc = (0, 220, 80) if state["has_hand"] else (80, 80, 200)
     cv2.putText(frame, f"Hand:{state['hand_n']}", (10, 32),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, hc, 2)
 
     if confirmed_word:
-        frame = put_text(frame, confirmed_word,           (10, 48),  font_large, (0, 220, 80))
-        frame = put_text(frame, f"{confirmed_conf:.0%}",  (10, 100), font_small, (160, 255, 160))
+        texts.append((confirmed_word,           (10, 48),  font_large, (0, 220, 80)))
+        texts.append((f"{confirmed_conf:.0%}",  (10, 100), font_small, (160, 255, 160)))
     else:
-        frame = put_text(frame, "比手語等待辨識...", (10, 48), font_medium, (130, 130, 130))
+        texts.append(("比手語等待辨識...", (10, 48), font_medium, (130, 130, 130)))
 
-    frame = put_text(frame, "辨識紀錄", (w-190, 10), font_small, (180, 180, 180))
+    texts.append(("辨識紀錄", (w-190, 10), font_small, (180, 180, 180)))
     for i, (word, conf) in enumerate(reversed(result_history)):
         b = max(80, 240 - i*35)
-        frame = put_text(frame, f"{word}  {conf:.0%}",
-                         (w-190, 36+i*30), font_small, (b, b, b))
+        texts.append((f"{word}  {conf:.0%}",
+                      (w-190, 36+i*30), font_small, (b, b, b)))
 
     # 動作分數（幫助校準）
     mc = (0, 220, 80) if state["motion"] >= rec.motion_thresh else (80, 80, 200)
@@ -107,6 +108,7 @@ while True:
     cv2.putText(frame, "C=clear  Q=quit", (10, h-44),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.45, (100, 100, 100), 1)
 
+    frame = put_texts(frame, texts)
     cv2.imshow("手語模型測試 (LSTM)", frame)
     key = read_key()
     if key == ord('q'):

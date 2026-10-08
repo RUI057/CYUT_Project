@@ -48,7 +48,24 @@ def put_text(frame: np.ndarray, text: str, pos: tuple,
              font: ImageFont.FreeTypeFont,
              color: tuple = (255, 255, 255)) -> np.ndarray:
     """在 OpenCV BGR frame 上疊加中文文字，回傳 BGR frame"""
+    return put_texts(frame, [(text, pos, font, color)])
+
+
+def put_texts(frame: np.ndarray, items) -> np.ndarray:
+    """一次疊加多段中文文字：items = [(text, pos, font, color[, outline]), ...]，回傳 BGR frame。
+
+    color 是 RGB（文字是在轉成 RGB 的圖上畫的）。選填的 outline 是黑色描邊的粗細（像素），
+    亮色字疊在淺色背景上會看不清楚，描邊讓任何背景都讀得到。
+
+    每一幀有好幾段文字時一定要用這個：put_text 每呼叫一次，整張畫面就要
+    BGR→RGB→PIL→RGB→BGR 轉換一次。實測 1080p 畫 8 段要 40 ms，占收集迴圈 77% 的時間，
+    幀率掉到 19 fps，快速手勢時 MediaPipe 就容易跟丟。合併成一次轉換只要幾 ms。
+    """
+    if not items:
+        return frame
     img_pil = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
     draw    = ImageDraw.Draw(img_pil)
-    draw.text(pos, text, font=font, fill=color)
+    for text, pos, font, color, *outline in items:
+        draw.text(pos, text, font=font, fill=color,
+                  stroke_width=outline[0] if outline else 0, stroke_fill=(0, 0, 0))
     return cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
