@@ -103,6 +103,28 @@ def chat(messages, max_new_tokens=48) -> str:
     return _tok.decode(out[0, inputs["input_ids"].shape[1]:], skip_special_tokens=True)
 
 
+def chat_candidates(messages, k=6, max_new_tokens=48):
+    """束搜尋：一次產生 k 個候選 → [(文字, 分數)]，分數是平均 log 機率（越大越有把握）。
+
+    貪婪解碼只看每一步的第一名，小模型常因此把「我 要 喝」寫成「我要喝水」或混進英文；
+    多看幾個候選，再由呼叫端依忠實度挑最好的（見 translate._local）。
+    """
+    load()
+    if _model is None:
+        raise RuntimeError(f"本機模型無法使用：{_error}")
+    prompt = _tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True,
+                                      enable_thinking=False)
+    inputs = _tok(prompt, return_tensors="pt").to(_device)
+    with _lock, torch.no_grad():
+        out = _model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False,
+                              num_beams=k, num_return_sequences=k, early_stopping=True,
+                              repetition_penalty=1.05, pad_token_id=_tok.eos_token_id,
+                              return_dict_in_generate=True, output_scores=True)
+    n = inputs["input_ids"].shape[1]
+    texts = [_tok.decode(seq[n:], skip_special_tokens=True) for seq in out.sequences]
+    return list(zip(texts, out.sequences_scores.tolist()))
+
+
 if __name__ == "__main__":
     # 一律透過 src.local_llm 操作：-m 執行時本檔是 __main__，
     # 直接呼叫本檔的 load() 會和 translate 匯入的 src.local_llm 各載一份模型

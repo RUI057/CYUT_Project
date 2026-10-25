@@ -5,6 +5,11 @@
   gemini 雲端 Gemini；失敗時退回本機模型
   off    不修正，直接用「、」串接詞彙
 所有後端都失敗時，一律退回串接，確保網頁不會因翻譯而中斷。
+
+準確度（2026-10-25 評測，見 _local 說明）：
+  - 單一個詞不問模型，直接用規則輸出（真實使用約 6 成是單詞，模型在這裡只會亂補）
+  - 本機模型用束搜尋產生多個候選，再依「忠實度」挑一個，而不是只取貪婪解碼的第一名
+  POLISH_BEAMS 控制候選數（預設 6；1 = 關閉，回到貪婪解碼）。
 """
 import os
 import re
@@ -14,6 +19,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 BACKEND = os.getenv("POLISH_BACKEND", "local").strip().lower()
+BEAMS   = max(1, int(os.getenv("POLISH_BEAMS", "6")))
 
 SYSTEM = """你是台灣手語翻譯助手。使用者會給你手語辨識出的詞彙序列，
 手語的語序和中文不同（常見：時間詞在前、動詞在後、疑問詞放句尾）。
@@ -39,8 +45,23 @@ FEW_SHOT = [
     (["廁所", "前面"], "廁所在前面。"),
 ]
 
-BACKEND_NAMES = {"local": "本機模型", "gemini": "Gemini", "off": "未修正"}
+BACKEND_NAMES = {"local": "本機模型", "gemini": "Gemini", "off": "未修正", "rule": "規則"}
 QUESTION_WORDS = ("什麼", "哪裡", "為什麼", "誰", "怎麼", "幾")
+
+# 同一個手勢對應多個中文詞：模型只會收到前者，但句子寫成後者也算保留了這個詞。
+# （「今天」「現在」比法相同，2026-10-25 合併成同一個詞，見 data/vocabulary.json）
+# 提示詞裡加「今天也可寫成現在」實測無效：本機 1.5B 模型一次都沒用到「現在」，
+# 還讓「右 走路」從「往右走」變成「我往右走」，所以只在檢查邏輯認同義詞，不動提示詞。
+# 「幫忙」是不及物動詞，通順的說法是「幫我忙」或「幫我」，不是「幫忙我」。
+# 「什麼」放在主詞後面沒有動詞時，通順的說法是「做什麼」「幹什麼」（「你晚上什麼？」不通）。
+# 長的放前面：_rest 依序刪除，才不會把「做什麼」只刪掉「什麼」而留下「做」被當成多加的字。
+SYNONYMS = {"今天": ("今天", "現在"),
+            "幫忙": ("幫忙", "幫我忙", "幫你忙", "幫他忙", "幫"),
+            "什麼": ("做什麼", "幹什麼", "什麼")}
+
+
+def _alts(word):
+    return SYNONYMS.get(word, (word,))
 
 _cc = None
 
@@ -82,12 +103,60 @@ def _finish(text):
     return _to_traditional(_clean(text))
 
 
+_NON_CJK = re.compile(r"[A-Za-z\u3040-\u30ff]+")      # 小模型偶爾會冒出 want 之類的英文
+
+# 小模型自己多加、會改變語意的動詞／助動詞（「我 讀書」→「我要讀書」、「我 不會 手語」→「我不會說手語」）。
+# 輸入裡沒有、句子裡卻有，就在排序時排後面（嚴格分層，不看模型信心）。
+_ADD_WATCH = ("要", "想", "說", "會", "去", "來", "吃", "喝", "買", "給", "拿", "坐", "找", "問", "讀", "看", "聽")
+# 自由補的虛詞字與標點：不算「多加」
+_FUNC = set("的了在很好太真是有和跟與也都就吧呢啊著過把被對叫")
+_PUNCT = set("。？！，、,.?! ")
+_GREETINGS = {"你好", "再見", "早安"}
+
+
+def _rest(sentence, words):
+    """扣掉輸入詞（含同義詞）之後，句子還剩下什麼——剩下的就是模型自己加的。"""
+    for w in sorted(words, key=len, reverse=True):
+        for a in _alts(w):
+            sentence = sentence.replace(a, "")
+    return sentence
+
+
+def _added_verbs(sentence, words):
+    rest = _rest(sentence, words)
+    return [c for c in _ADD_WATCH if c in rest]
+
+
+def _extra_chars(sentence, words):
+    """不屬於輸入詞、也不是常見虛詞／標點的字數：越少越忠實。"""
+    return sum(1 for c in _rest(sentence, words) if c not in _FUNC and c not in _PUNCT)
+
+
+def _inversions(sentence, words):
+    """句子裡各詞出現的順序和輸入順序相比，有幾對顛倒。手語的詞序本身帶有關係
+    （「明天 考試 我 不會」≠「我明天不會考試」），能保持原序就保持。"""
+    pos = []
+    for w in words:
+        idx = [sentence.find(a) for a in _alts(w) if a in sentence]
+        if idx:
+            pos.append(min(idx))
+    return sum(1 for i in range(len(pos)) for j in range(i + 1, len(pos)) if pos[i] > pos[j])
+
+
+def _single(word):
+    """單一個詞：疑問詞加「？」，其餘原詞加句號（招呼語用「！」）。不問模型，不會亂補。"""
+    if any(q in word for q in QUESTION_WORDS):
+        return word + "？"
+    return word + ("！" if word in _GREETINGS else "。")
+
+
 def _issues(sentence, words):
     """需要請模型修正的地方：漏掉的詞、序列裡沒有卻自己加上的疑問詞。空 list 代表沒問題。"""
     joined = "".join(words)
-    out = [f"漏掉了「{w}」" for w in words if w not in sentence]
+    out = [f"漏掉了「{w}」" for w in words if not any(a in sentence for a in _alts(w))]
     out += [f"序列裡沒有「{q}」，不要自己加入疑問詞"
             for q in QUESTION_WORDS if q in sentence and q not in joined]
+    out += [f"不要使用英文或日文「{x}」，只能用中文" for x in _NON_CJK.findall(sentence)]
     return out
 
 
@@ -99,14 +168,37 @@ def _plausible(sentence, words):
     if len(sentence) > 3 * len(joined) + 12:
         return False
     # 每個詞有多少字出現在句子裡；平均低於一半視為離題（小模型改寫過頭或幻覺）
-    cover = sum(sum(c in sentence for c in w) / len(w) for w in words) / len(words)
+    cover = sum(max(sum(c in sentence for c in a) / len(a) for a in _alts(w))
+                for w in words) / len(words)
     return cover >= 0.5
+
+
+def _rank_key(sentence, score, words):
+    """候選排序（越小越好）。分層：先看硬問題（漏詞、多疑問詞、英文），
+    再看自己多加的動詞，同層才用「模型信心 − 多加字數」。
+
+    2026-10-25 在 71 句（調參集＋保留集，詞序、時間、疑問、稱謂等）的評測：
+      貪婪解碼 78%／69% → 束搜尋＋這個排序 94%／89%（調參集／保留集）；
+      另外盲寫的 25 句驗證集 56% → 84%。
+    消融：多加字懲罰從 0.5 降到 0.1 保留集掉 6 點、「幫忙」同義詞掉 3 點；「嗎」猜測、
+    「幫忙我」文法兩種懲罰沒有可量測的貢獻，所以沒放進來。詞序懲罰在精確比對的分數上看不出差別，
+    但它擋掉了「明天 考試 我 不會」→「我明天不會考試」這種改變語意的重排，所以保留。
+    """
+    return ((len(_issues(sentence, words)), len(_added_verbs(sentence, words))),
+            -score + 0.5 * _extra_chars(sentence, words) + 0.05 * _inversions(sentence, words))
 
 
 def _local(words):
     from src import local_llm
-    msgs  = _messages(words)
-    first = _finish(local_llm.chat(msgs))
+    msgs = _messages(words)
+    if BEAMS > 1:
+        cands = [(_finish(t), sc) for t, sc in local_llm.chat_candidates(msgs, BEAMS)]
+        cands = [(t, sc) for t, sc in cands if t and _plausible(t, words)]
+        first = min(cands, key=lambda c: _rank_key(c[0], c[1], words))[0] if cands else None
+    else:
+        first = None
+    if first is None:                       # 候選全不合理（或關閉束搜尋）→ 貪婪解碼
+        first = _finish(local_llm.chat(msgs))
     issues = _issues(first, words)
     if not issues:
         return first
@@ -141,6 +233,8 @@ def polish(words):
     words = [w for w in words if w]
     if not words:
         return "", BACKEND_NAMES["off"]
+    if len(words) == 1 and BACKEND != "off":
+        return _single(words[0]), BACKEND_NAMES["rule"]
     for name in _order():
         try:
             sentence = _BACKENDS[name](words)
