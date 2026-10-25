@@ -21,6 +21,7 @@ import queue
 import sys
 import threading
 import time
+from contextlib import asynccontextmanager
 from datetime import datetime
 
 # macOS：AVFoundation 的攝影機授權請求只能在主執行緒發出，但這裡是在背景執行緒開
@@ -280,25 +281,25 @@ def worker_loop(hub: Hub):
 
 
 # ── FastAPI ───────────────────────────────────
-app = FastAPI(title="手語即時翻譯")
-_threads = []
-
-
-@app.on_event("startup")
-def _startup():
+@asynccontextmanager
+async def lifespan(_app):
+    """啟動時開擷取／翻譯執行緒，關閉時收掉（取代已棄用的 on_event）。"""
+    threads = []
     for fn in (capture_loop, worker_loop):
         t = threading.Thread(target=fn, args=(HUB,), daemon=True)
         t.start()
-        _threads.append(t)
+        threads.append(t)
     threading.Thread(target=translate.warmup, daemon=True).start()  # 預熱，第一次翻譯不用等
+    try:
+        yield
+    finally:
+        HUB.stop.set()          # /stream 的產生器與兩條執行緒都靠它結束
+        HUB.want_cam.clear()
+        for t in threads:
+            t.join(timeout=2)
 
 
-@app.on_event("shutdown")
-def _shutdown():
-    HUB.stop.set()
-    HUB.want_cam.clear()
-    for t in _threads:
-        t.join(timeout=2)
+app = FastAPI(title="手語即時翻譯", lifespan=lifespan)
 
 
 @app.get("/stream")
