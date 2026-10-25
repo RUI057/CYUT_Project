@@ -95,7 +95,7 @@ class Hub:
         self.lock = threading.Lock()
         self.jpeg = placeholder_jpeg("攝影機未啟動", "按「啟動攝影機」開始辨識")
         self.frame_seq = 0          # 每張新影格 +1，/stream 靠它判斷有沒有新畫面
-        self.status = {"has_hand": False, "has_face": False, "hand_n": 0,
+        self.status = {"has_hand": False, "hand_n": 0,
                        "confirm_word": "", "confirm_pct": 0, "buffer_pct": 0,
                        "motion": 0.0, "cooldown": 0, "fps": 0.0}
         self.words = []
@@ -209,7 +209,7 @@ def capture_loop(hub: Hub):
             frame = cv2.flip(frame, 1)
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             state = hub.recognizer.process(rgb)
-            camera.draw_landmarks(frame, state["results"], state.get("face_results"))
+            camera.draw_landmarks(frame, state["results"])
 
             # 確認到新詞 → 加入序列（連續同詞只算一次）
             if state["confirmed"]:
@@ -234,7 +234,7 @@ def capture_loop(hub: Hub):
                                        [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
             if enc_ok:
                 hub.set_frame(buf.tobytes(), {
-                    "has_hand": state["has_hand"], "has_face": state["has_face"],
+                    "has_hand": state["has_hand"],
                     "hand_n": state["hand_n"], "confirm_word": state["confirm_word"],
                     "confirm_pct": state["confirm_pct"], "buffer_pct": state["buffer_pct"],
                     "motion": round(float(state["motion"]), 4),
@@ -574,7 +574,6 @@ async function tick() {
 
   const st = s.status;
   let txt = st.has_hand ? `偵測到 ${st.hand_n} 隻手　` : '未偵測到手　';
-  txt += st.has_face ? '臉：OK　' : '臉：無　';
   if (st.cooldown > 0) txt += `冷卻 ${st.cooldown}　`;
   else if (st.confirm_word) txt += `確認中：${st.confirm_word} ${st.confirm_pct}%　`;
   txt += `Buffer ${st.buffer_pct}%　Motion ${st.motion.toFixed(4)}　${st.fps} fps`;

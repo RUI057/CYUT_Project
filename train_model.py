@@ -6,8 +6,6 @@
 用法：
   python train_model.py                 完整訓練（交叉驗證 + 最終模型）
   python train_model.py --quick         跳過交叉驗證，只練出模型
-  python train_model.py --face          啟用臉部特徵（需每個詞都有含臉樣本）
-  python train_model.py --loc           啟用位置特徵（手相對臉的位置，需每個詞都有含位置樣本）
   python train_model.py --epochs 30     調整訓練輪數
 """
 import argparse
@@ -20,28 +18,21 @@ from src import trainer
 from src.trainer import (load_dataset, cross_validate, train_full,
                          confusion_pairs, full_report,
                          DEVICE, EPOCHS, N_FOLDS, SEQ_LEN)
-from src.features import model_dim, MOTION_THRESH
+from src.features import FEAT_DIM, MOTION_THRESH
 from src.model import GestureLSTM
 
 ap = argparse.ArgumentParser(description="訓練手語辨識模型")
 ap.add_argument("--quick", action="store_true", help="跳過交叉驗證（不會有準確率數字）")
-ap.add_argument("--face", action="store_true",
-                help="啟用臉部特徵（預設停用；需每個詞都有含臉樣本才不會作弊）")
-ap.add_argument("--loc", action="store_true",
-                help="啟用位置特徵（預設停用；需每個詞都有含位置樣本才不會作弊）")
 ap.add_argument("--epochs", type=int, default=EPOCHS, help=f"訓練輪數（預設 {EPOCHS}）")
 ap.add_argument("--folds", type=int, default=N_FOLDS, help=f"交叉驗證折數（預設 {N_FOLDS}）")
 ap.add_argument("--min-samples", type=int, default=0, help="樣本數不足的詞直接跳過")
 ap.add_argument("--out", default="data/model.pkl", help="模型輸出路徑")
 args = ap.parse_args()
 
-USE_FACE     = args.face or trainer.USE_FACE
-USE_LOC      = args.loc or trainer.USE_LOC
 CLEAN_TRACKS = trainer.CLEAN_TRACKS
-X, y, groups, classes = load_dataset(min_samples=args.min_samples, use_face=USE_FACE,
-                                     clean_tracks=CLEAN_TRACKS, use_loc=USE_LOC)
+X, y, groups, classes = load_dataset(min_samples=args.min_samples, clean_tracks=CLEAN_TRACKS)
 N_CLASS = len(classes)
-IN_DIM  = model_dim(USE_LOC)
+IN_DIM  = FEAT_DIM
 
 # 每個詞有幾個「錄製組」（同一次錄製為一組，見 trainer.load_dataset）。
 # 只有 1 組的詞在 session-aware 交叉驗證時整組被拿去驗證、訓練沒看過，預測必錯：
@@ -53,8 +44,7 @@ single    = [classes[c] for c in range(N_CLASS) if not evaluable[c]]
 factory = lambda: GestureLSTM(feat_dim=IN_DIM, num_classes=N_CLASS).to(DEVICE)
 
 print(f"\n[模型] LSTM  參數量：{sum(p.numel() for p in factory().parameters()):,}"
-      f"  輸入 {IN_DIM} 維  臉部：{'啟用' if USE_FACE else '停用'}"
-      f"  位置：{'啟用' if USE_LOC else '停用'}")
+      f"  輸入 {IN_DIM} 維（雙手）")
 
 # ── 交叉驗證（誠實準確率）──────────────────────
 cv_mean = cv_std = 0.0
@@ -67,7 +57,7 @@ else:
     print(f"\n[交叉驗證] {args.folds}-fold（session-aware，舊資料按連號區塊分組）")
     fold_accs, agg_true, agg_pred, agg_proba = cross_validate(
         factory, X, y, groups, N_CLASS, n_folds=args.folds, epochs=args.epochs,
-        use_loc=USE_LOC, return_proba=True)
+        return_proba=True)
     cv_mean, cv_std = float(np.mean(fold_accs)), float(np.std(fold_accs))
     print(f"\n[交叉驗證結果] {args.folds}-fold 準確率：{cv_mean:.1%} ± {cv_std:.1%}")
 
@@ -78,8 +68,7 @@ else:
 
     print("\n[彙整分類報告]（每筆資料各被驗證一次）")
     report += [f"訓練時間：{datetime.now():%Y-%m-%d %H:%M}",
-               f"資料：{len(X)} 筆、{N_CLASS} 個詞；輸入 {IN_DIM} 維  臉部：{'啟用' if USE_FACE else '停用'}"
-               f"  位置：{'啟用' if USE_LOC else '停用'}",
+               f"資料：{len(X)} 筆、{N_CLASS} 個詞；輸入 {IN_DIM} 維（雙手）",
                f"{args.folds}-fold 交叉驗證準確率：{cv_mean:.1%} ± {cv_std:.1%}"
                f"（各折 {' '.join(f'{a:.0%}' for a in fold_accs)}）",
                f"排除 {len(single)} 個只有 1 個錄製組、無法評估的詞後：{acc_eval:.1%}（{int(keep.sum())} 筆）",
@@ -99,7 +88,7 @@ else:
 
 # ── 用全部資料訓練最終模型並儲存 ──────────────
 print("\n[最終模型] 以全部資料重新訓練後儲存")
-final_state = train_full(factory, X, y, N_CLASS, epochs=args.epochs, use_loc=USE_LOC)
+final_state = train_full(factory, X, y, N_CLASS, epochs=args.epochs)
 
 # ── 每個詞的推理動作門檻：靜態手勢（誰、是…）放寬，其餘維持全域門檻 ──
 motion_thr = trainer.motion_thresholds(classes)
@@ -113,8 +102,6 @@ payload = {
     "classes":     classes,
     "seq_len":     SEQ_LEN,
     "feat_dim":    IN_DIM,
-    "use_face":    USE_FACE,
-    "use_loc":     USE_LOC,
     "clean_tracks": CLEAN_TRACKS,
     "hidden":      128,
     "num_layers":  2,

@@ -13,7 +13,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from src.trainer import (load_dataset, cross_validate, confusion_pairs,
                          DEVICE, EPOCHS, N_FOLDS)
-from src.features import model_dim
+from src.features import FEAT_DIM
 from src.model import GestureLSTM
 from src.model_stgcn import GestureSTGCN
 
@@ -30,8 +30,8 @@ print(f"裝置：{DEVICE}　epochs={args.epochs}　folds={args.folds}"
       f"　詞彙數={N_CLASS}（min_samples={args.min_samples}）")
 
 MODELS = {
-    "LSTM":   lambda: GestureLSTM(feat_dim=model_dim(False), num_classes=N_CLASS).to(DEVICE),
-    "ST-GCN": lambda: GestureSTGCN(feat_dim=model_dim(False), num_classes=N_CLASS).to(DEVICE),
+    "LSTM":   lambda: GestureLSTM(feat_dim=FEAT_DIM, num_classes=N_CLASS).to(DEVICE),
+    "ST-GCN": lambda: GestureSTGCN(feat_dim=FEAT_DIM, num_classes=N_CLASS).to(DEVICE),
 }
 
 results = {}

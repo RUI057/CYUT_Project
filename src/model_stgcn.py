@@ -84,8 +84,8 @@ class GestureSTGCN(nn.Module):
         self.fc = nn.Linear(256, num_classes)
 
     def forward(self, x):                        # x: (B, T, ≥126)
-        # 只用前 126 維雙手：臉部表情、位置不是手部 21 點圖上的節點。
-        # 管線輸入是 162 / 168 維（見 features.to_model_input），不切會在 view 時崩潰。
+        # 只用前 126 維雙手（手部 21 點圖的節點）。現行管線輸入就是 126 維；
+        # 這個切片留著，萬一餵進舊格式的 162 維，不切會在 reshape 時崩潰。
         x = x[..., :self.num_person * self.num_point * self.in_channels]
         B, T, _ = x.size()
         # (B,T,126) → (B, C=3, T, V=21, M=2)；126 排列為 [左手63][右手63]，每手 21×(x,y,z)

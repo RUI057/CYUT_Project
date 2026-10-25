@@ -11,7 +11,7 @@
   → Windows 上環境放在 C:\\Users\\Public\\cyut_venv（短、純英文、不會被同步）
 
 流程：檢查 Python 版本 → 建立環境 → 安裝套件（只有第一次、或套件清單有變才裝）
-     → 自我檢查（真的建立一次 MediaPipe 手部／臉部偵測器）→ 開啟選單 start.py
+     → 自我檢查（真的建立一次 MediaPipe 手部偵測器）→ 開啟選單 start.py
 """
 import hashlib
 import os
@@ -183,12 +183,10 @@ import mediapipe as mp
 if not hasattr(mp, "solutions"):
     raise SystemExit("MEDIAPIPE_NO_SOLUTIONS " + getattr(mp, "__version__", "?"))
 extra = [importlib.import_module(m) for m in sys.argv[1:]]   # 訓練用套件，純收集版沒有
-from src.features import MP_HANDS_KWARGS, MP_FACE_KWARGS
+from src.features import MP_HANDS_KWARGS
 img = numpy.zeros((240, 320, 3), numpy.uint8)
 with mp.solutions.hands.Hands(**MP_HANDS_KWARGS) as h:
     h.process(img)
-with mp.solutions.face_mesh.FaceMesh(**MP_FACE_KWARGS) as f:
-    f.process(img)
 print(" / ".join(["numpy " + numpy.__version__, "opencv " + cv2.__version__,
                   "mediapipe " + mp.__version__] + [m.__name__ + " " + m.__version__ for m in extra]))
 """
@@ -211,7 +209,7 @@ def diagnose(err, prefix):
 
 
 def smoke_test():
-    say("\n自我檢查：實際建立 MediaPipe 手部／臉部偵測器...")
+    say("\n自我檢查：實際建立 MediaPipe 手部偵測器...")
     extra = [imp for pip, imp in TRAIN_MODULES.items() if pip in req_names()]
     r = subprocess.run([sys.executable, "-c", SMOKE, *extra], capture_output=True,
                        text=True, errors="replace", cwd=str(ROOT))
