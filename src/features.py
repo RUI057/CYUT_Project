@@ -354,13 +354,37 @@ def _time_warp(seq, rng):
     return np.concatenate([smooth, nearest], axis=1).astype(np.float32)
 
 
+def _geo_jitter(seq, rng):
+    """手形比例／深度／旋轉的隨機擾動（兩隻手各自獨立）。
+
+    不同人的手指長短比例、手腕角度、離鏡頭遠近都不同，而 MediaPipe 的 z 又最不可靠。
+    2026-10-25 對照實驗（只有新資料、每場不同人的 48 詞，跨場次 5 折驗證，各設定同切分同種子）：
+      現行增強 57.4%（兩個種子 57.9 / 56.9）→ 加上這個 62.9%，五折全部都比現行好；
+      更寬的速度＋起訖位移 57.1%（無效）、左右手鏡射 53.1%（有害）所以沒採用。
+    只動手部（相對手腕的座標），不影響臉部與位置特徵。
+    """
+    seq = seq.copy()
+    T = len(seq)
+    h = seq[:, :HANDS_DIM].reshape(T, 2, 21, 3)        # 欄位不連續，這裡是副本，最後要寫回
+    for k in (0, 1):
+        h[:, k, :, 0] *= rng.uniform(0.85, 1.15)
+        h[:, k, :, 1] *= rng.uniform(0.85, 1.15)
+        h[:, k, :, 2] *= rng.uniform(0.6, 1.4)         # z 最不可靠，擾動最大
+        a = rng.uniform(-0.25, 0.25)
+        c, s = np.cos(a), np.sin(a)
+        x, y = h[:, k, :, 0].copy(), h[:, k, :, 1].copy()
+        h[:, k, :, 0], h[:, k, :, 1] = x * c - y * s, x * s + y * c
+    seq[:, :HANDS_DIM] = h.reshape(T, HANDS_DIM)
+    return seq
+
+
 def augment_sequence(seq, rng):
-    """訓練用資料增強：時間伸縮 + 平面旋轉 + 微抖動 + 隨機掉手/掉臉/掉位置基準。
+    """訓練用資料增強：手形擾動 + 時間伸縮 + 平面旋轉 + 微抖動 + 隨機掉手/掉臉/掉位置基準。
 
     所有增強都在 raw 特徵上做，之後再 normalize_sequence。
     輸入若為 126 / 162 維（舊資料）會先補 0 到 170。
     """
-    seq = _time_warp(pad_features(seq), rng)
+    seq = _time_warp(_geo_jitter(pad_features(seq), rng), rng)
     T   = len(seq)
 
     # 平面旋轉（模擬攝影機/頭部些微傾斜），手、臉、位置同角度
