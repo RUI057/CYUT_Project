@@ -6,6 +6,8 @@
 3. 靜止樣本       — 動作幅度低於該詞的動作門檻，即時推理不會觸發預測
                    （門檻規則與推理端相同：靜態手勢如「誰」會自動放寬，見 features.py）
 4. 掉手樣本       — 該詞多數樣本是雙手，此樣本卻大半時間只有單手
+   比法差異       — 同一場錄製「整批」都是單手（≥80%）→ 不是壞樣本，是這位錄製者用了
+                   不同的比法（單手 vs 雙手），整場彙總成一行，不列入壞樣本、別整批刪
 5. 離群樣本       — 正規化後的平均姿態離同詞中心 > mean+3σ
 
 只列清單不刪除；確認後可用印出的指令刪。
@@ -13,7 +15,9 @@
 """
 import argparse
 import os
+import re
 import sys
+from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
@@ -27,6 +31,9 @@ EMPTY_FRAME_PCT = 0.30    # 超過 30% 幀沒手 → 空樣本
 TWO_HAND_CLASS  = 0.70    # 全詞 both-hands 幀比 > 70% → 視為雙手詞
 DROPOUT_SAMPLE  = 0.30    # 雙手詞中樣本 both-hands 幀比 < 30% → 掉手
 OUTLIER_SIGMA   = 3.0
+VARIANT_MIN     = 10      # 同詞同場次至少這麼多筆，才判斷是不是「整場比法不同」
+VARIANT_RATIO   = 0.80    # 其中掉手的比例 ≥ 此值 → 整場是不同比法，不是壞樣本
+_SESSION_RE     = re.compile(r"^(\d{8}_\d{6})_")
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--data-dir", default="dynamic_dataset")
@@ -35,7 +42,7 @@ args = ap.parse_args()
 root = Path(args.data_dir)
 labels = sorted(d.name for d in root.iterdir() if d.is_dir() and not d.name.startswith("."))
 
-issues = {"shape": [], "empty": [], "static": [], "dropout": [], "outlier": []}
+issues = {"shape": [], "empty": [], "static": [], "dropout": [], "outlier": [], "variant": []}
 per_word = {}
 
 for label in labels:
@@ -70,7 +77,7 @@ for label in labels:
         continue
 
     is_two_hand = np.mean(both_fracs) > TWO_HAND_CLASS
-    flag_e = flag_s = flag_d = 0
+    flag_e = flag_s = flag_d = flag_v = 0
 
     motion_thr = class_motion_thresholds({label: [m[3] for m in metas]})[label]
     for f, any_hand, both_hand, motion, _hf, _hl in metas:
@@ -83,6 +90,24 @@ for label in labels:
         if is_two_hand and both_hand < DROPOUT_SAMPLE:
             issues["dropout"].append((label, f.name, f"雙手幀僅 {both_hand:.0%}"))
             flag_d += 1
+
+    # 整場掉手 = 比法差異：同詞同場次若 ≥80% 都被判掉手，那是錄製者用了不同的比法
+    # （例如其他人雙手、他單手），不是每筆都壞。改成彙總一行，別讓人照清單整批刪掉。
+    by_ses, drop_in = defaultdict(list), defaultdict(list)
+    for f, _a, _b, _m, _hf, _hl in metas:
+        m = _SESSION_RE.match(f.stem)
+        if m:
+            by_ses[m.group(1)].append(f.name)
+    dropped = {item[1] for item in issues["dropout"] if item[0] == label}
+    for ses, names_in in by_ses.items():
+        d = [n for n in names_in if n in dropped]
+        if len(names_in) >= VARIANT_MIN and len(d) / len(names_in) >= VARIANT_RATIO:
+            issues["dropout"] = [it for it in issues["dropout"]
+                                 if not (it[0] == label and it[1] in set(d))]
+            issues["variant"].append((label, f"{ses}_*",
+                                      f"{len(d)}/{len(names_in)} 筆只有單手，其餘場次是雙手 → 比法不同"))
+            flag_d -= len(d)
+            flag_v += len(d)
 
     # 離群：到同詞中心的距離 > mean + 3σ
     F = np.stack(feats)
@@ -98,21 +123,22 @@ for label in labels:
     n_face = sum(1 for m in metas if m[4])
     n_loc  = sum(1 for m in metas if m[5])
     per_word[label] = dict(n=len(metas), two_hand=is_two_hand, face=n_face, loc=n_loc,
-                           empty=flag_e, static=flag_s, dropout=flag_d, outlier=flag_o)
+                           empty=flag_e, static=flag_s, dropout=flag_d, outlier=flag_o, variant=flag_v)
 
 # ── 報告 ──────────────────────────────────────
-print(f"{'詞彙':<8}{'筆數':>5}{'含臉':>6}{'位置':>6}{'雙手':>5}{'空':>4}{'靜止':>5}{'掉手':>5}{'離群':>5}")
-print("-" * 53)
+print(f"{'詞彙':<8}{'筆數':>5}{'含臉':>6}{'位置':>6}{'雙手':>5}{'空':>4}{'靜止':>5}{'掉手':>5}{'離群':>5}{'異法':>5}")
+print("-" * 58)
 total_bad = 0
 for label, s in per_word.items():
     bad = s["empty"] + s["static"] + s["dropout"] + s["outlier"]
     total_bad += bad
     mark = " ←" if bad else ""
     print(f"{label:<8}{s['n']:>5}{s['face']:>6}{s['loc']:>6}{'是' if s['two_hand'] else '　':>5}"
-          f"{s['empty']:>4}{s['static']:>5}{s['dropout']:>5}{s['outlier']:>5}{mark}")
+          f"{s['empty']:>4}{s['static']:>5}{s['dropout']:>5}{s['outlier']:>5}{s['variant']:>5}{mark}")
 
 names = {"shape": "shape 錯誤", "empty": "空樣本", "static": "靜止樣本",
-         "dropout": "掉手樣本", "outlier": "離群樣本"}
+         "dropout": "掉手樣本", "outlier": "離群樣本",
+         "variant": "比法差異（整場，非壞樣本，別整批刪；要統一比法請找該錄製者重錄）"}
 print()
 for key, items in issues.items():
     if not items:
@@ -148,9 +174,11 @@ if tloc and l_none:
     print("  → 每個詞都有含位置樣本後，才能用 train_model.py --loc 啟用位置特徵。")
 print()
 
-n_issues = sum(len(v) for v in issues.values())
-print(f"總計：{n_issues} 筆可疑（部分樣本可能同時中多項）")
-if n_issues:
+n_variant = sum(s["variant"] for s in per_word.values())
+n_issues = sum(len(v) for k, v in issues.items() if k != "variant")
+print(f"總計：{n_issues} 筆可疑（部分樣本可能同時中多項）"
+      + (f"；另有 {n_variant} 筆是比法差異（不算壞樣本）" if n_variant else ""))
+if n_issues or n_variant:
     out = Path("data/quality_report.txt")
     with out.open("w", encoding="utf-8") as fh:
         for key, items in issues.items():
