@@ -44,6 +44,7 @@ from pydantic import BaseModel
 from src import camera
 from src import translate
 from src.font_utils import get_font, put_text
+from src import tts
 from src.tts import synthesize
 from src.video import open_camera, camera_help
 
@@ -340,7 +341,7 @@ async def get_audio():
         audio = HUB.audio
     if not audio:
         return Response(status_code=204)
-    return Response(audio, media_type="audio/mpeg",
+    return Response(audio, media_type=tts.mime_of(audio),
                     headers={"Cache-Control": "no-store"})
 
 
@@ -418,8 +419,9 @@ async def index():
     warn = "" if ready else (
         '<p class="warn">找不到模型 <code>data/model.pkl</code>，'
         '請先執行 <code>python train_model.py</code>。畫面可以開，但不會辨識。</p>')
-    return PAGE.replace("<!--WARN-->", warn).replace(
-        "<!--BACKEND-->", translate.backend_status())
+    return (PAGE.replace("<!--WARN-->", warn)
+                .replace("<!--BACKEND-->", translate.backend_status())
+                .replace("<!--TTS-->", tts.backend_status()))
 
 
 PAGE = """<!DOCTYPE html>
@@ -469,7 +471,7 @@ PAGE = """<!DOCTYPE html>
 <body>
 <header>
   <h1>手語翻譯</h1>
-  <p>MediaPipe + LSTM 辨識手語詞彙，語義修正：<!--BACKEND-->，gTTS 朗讀。</p>
+  <p>MediaPipe + LSTM 辨識手語詞彙，語義修正：<!--BACKEND-->；朗讀：<!--TTS-->。</p>
   <!--WARN-->
 </header>
 

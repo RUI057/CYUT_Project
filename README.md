@@ -11,7 +11,7 @@
 - 攝影機實時手語捕捉與特徵提取
 - 基於 LSTM 的時間序列詞彙識別
 - 本機語言模型語義修正與自然句子生成（離線、免 API 金鑰；可切換 Gemini）
-- Google TTS 文字語音合成
+- 文字語音合成：Google TTS，連不上網路時自動改用 macOS 本機語音（離線也能朗讀）
 - 訓練資料的自動收集與管理
 
 ## 項目結構
@@ -53,7 +53,7 @@ CYUT_MDFK/
     ├── translate.py          語義修正：詞彙序列 → 自然句子（單詞規則、束搜尋排序、自我修正、後端切換、退路）
     ├── local_llm.py          本機語言模型（transformers，離線生成）
     ├── gemini_api.py         Gemini 雲端後端（選用）
-    ├── tts.py                文字轉語音
+    ├── tts.py                文字轉語音（gTTS 優先，連不上自動改用本機 say 語音）
     └── font_utils.py         文字繪製工具
 ```
 
@@ -124,7 +124,7 @@ python web.py --port 9000 --host 0.0.0.0   # 讓同網段的手機/平板也能�
 
 1. 按「啟動攝影機」，對著鏡頭比手語，系統即時辨識並累積詞彙
 2. 手離開畫面（停頓）→ 自動將詞彙序列交給本機語言模型轉成自然中文句子（句子下方會標示由哪個後端產生）
-3. gTTS 朗讀句子，並保存到翻譯紀錄
+3. 朗讀句子（gTTS；連不上網路時自動改用本機語音），並保存到翻譯紀錄
 4. 也可手動按「翻譯 / 朗讀 / 清除」，右側可調信心門檻、確認幀數與自動翻譯停頓
 
 **為什麼用 FastAPI + MJPEG**：Streamlit 的執行模型是「整頁重跑」，推即時影像得靠一個不會結束的
@@ -164,7 +164,11 @@ pip install -r requirements.txt
 POLISH_BACKEND=local                    # local（預設，本機模型）/ gemini / off（不修正）
 LOCAL_LLM=Qwen/Qwen2.5-1.5B-Instruct    # 換本機模型（Hugging Face 模型 id）
 GEMINI_API_KEY=your_api_key_here        # 選用：有設定時，本機模型失敗會自動改用 Gemini
+TTS_BACKEND=auto                        # auto（預設，gTTS 優先、連不上改本機語音）/ online / offline（展場建議）
+TTS_VOICE=Meijia                        # 本機語音名稱（預設自動挑台灣中文），列表：say -v '?'
 ```
+
+朗讀的離線備援用 macOS 內建的 `say`，**目前只支援 macOS**。展場網路不穩時設 `TTS_BACKEND=offline`，直接用本機語音、完全不連網；`auto` 模式在網路真的不通時，第一句會多等約 3 秒逾時，之後 60 秒內都直接走本機語音。
 
 預先下載本機模型（建議在有網路時先跑一次，展示時就不用等下載）：
 
@@ -280,4 +284,4 @@ vocabulary.json 定義所有可識別的詞彙，修改后需重新收集數據�
 
 - 補齊詞彙資料（目前 71 / 114 詞有資料）
 - 全身姿勢識別支持
-- 離線語音朗讀（目前 gTTS 需要網路，其餘流程已可離線）
+- Windows 的離線朗讀（目前離線備援只支援 macOS 的 `say`）

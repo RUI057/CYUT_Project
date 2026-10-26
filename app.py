@@ -1,7 +1,7 @@
 """台灣手語即時辨識 → 語義翻譯網頁。
 
 流程：攝影機 → LSTM 辨識手語詞 → 累積詞彙序列 →
-      本機語言模型轉成自然中文句子（可切換 Gemini，見 src/translate.py）→ gTTS 朗讀。
+      本機語言模型轉成自然中文句子（可切換 Gemini，見 src/translate.py）→ 朗讀（見 src/tts.py）。
 
 執行：streamlit run app.py
 """
@@ -19,7 +19,7 @@ os.chdir(ROOT)   # 翻譯紀錄 history/ 等相對路徑以專案資料夾為準
 import streamlit as st
 from src import camera
 from src import translate
-from src.tts import synthesize
+from src.tts import synthesize, mime_of
 from src.video import open_camera, camera_help
 
 RECORDS_PATH = "history/records.json"
@@ -117,7 +117,7 @@ st.sidebar.write("、".join(camera.get_classes()) or "（模型未載入）")
 
 # ── 標題 ──────────────────────────────────────
 st.title("手語翻譯")
-st.caption("MediaPipe + LSTM 辨識手語詞彙，本機語言模型語義修正成自然中文，gTTS 朗讀。")
+st.caption("MediaPipe + LSTM 辨識手語詞彙，本機語言模型語義修正成自然中文，並朗讀（連不上網路時用本機語音）。")
 
 if not camera.is_ready():
     st.error("找不到模型 data/model.pkl，請先執行 `python train_model.py`。")
@@ -176,7 +176,7 @@ sentence_ph.markdown(sentence_md() or "_（翻譯結果會顯示在這裡）_")
 
 # 音訊：只有剛翻譯/剛朗讀時自動播放一次
 if ss.audio_bytes:
-    audio_ph.audio(ss.audio_bytes, format="audio/mp3", autoplay=ss.play_audio)
+    audio_ph.audio(ss.audio_bytes, format=mime_of(ss.audio_bytes), autoplay=ss.play_audio)
 ss.play_audio = False
 
 
@@ -233,7 +233,7 @@ if run and ss.cap is not None:
             render_words()
             sentence_ph.markdown(sentence_md())
             if ss.audio_bytes:
-                audio_ph.audio(ss.audio_bytes, format="audio/mp3", autoplay=True)
+                audio_ph.audio(ss.audio_bytes, format=mime_of(ss.audio_bytes), autoplay=True)
             ss.play_audio = False   # 已就地播放，避免之後重跑時重播
 
         # 畫面顯示
