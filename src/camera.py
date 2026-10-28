@@ -44,6 +44,7 @@ _clean_tracks = False  # 由 model.pkl 的 clean_tracks 決定；舊模型訓練
 _in_dim = FEAT_DIM # 由 model.pkl 的 feat_dim 決定；大於 126 的舊模型，多出來的維度補 0
 _motion_thr = {}   # 由 model.pkl 的 motion_thresh 決定：每個詞的動作門檻（靜態手勢較低）
 DEFAULT_CONF = 0.8 # 模型沒有校準過的信心門檻時（舊模型、--quick 訓練）才用
+TOP_K = 3          # 回報給介面的候選詞數量
 _conf_thr = None   # 由 model.pkl 的 conf_thresh 決定：訓練時用交叉驗證校準的信心門檻
 
 try:
@@ -79,6 +80,11 @@ except FileNotFoundError:
 
 def is_ready() -> bool:
     return _model is not None
+
+
+def default_conf() -> float:
+    """模型校準過的信心門檻（沒有就用 DEFAULT_CONF）；網頁「恢復預設」用。"""
+    return float(_conf_thr or DEFAULT_CONF)
 
 
 def get_classes() -> list:
@@ -145,6 +151,7 @@ class SignRecognizer:
                 self.confirm_count = 0
 
         raw_word, raw_conf, motion = "", 0.0, 0.0
+        top = []          # 這一幀模型最有把握的前幾名 [(詞, 信心)]；沒跑模型就是空的
         if self.cooldown > 0:
             self.cooldown -= 1
         elif _model is not None and has_hand and len(self.buffer) == self.seq_len:
@@ -166,6 +173,9 @@ class SignRecognizer:
                     proba = torch.softmax(_model(x), dim=1)[0]
                 conf, idx = proba.max(0)
                 word = _classes[idx.item()]
+                k = min(TOP_K, len(_classes))
+                vals, ids = torch.topk(proba, k)
+                top = [(_classes[i], round(float(v), 3)) for v, i in zip(vals.tolist(), ids.tolist())]
                 need = min(self.motion_thresh, _motion_thr.get(word, self.motion_thresh))
                 if conf.item() >= self.conf_thresh and motion >= need:
                     raw_word, raw_conf = word, conf.item()
@@ -192,6 +202,7 @@ class SignRecognizer:
             "hand_n":         len(results.multi_hand_landmarks) if has_hand else 0,
             "raw_word":       raw_word,
             "raw_conf":       raw_conf,
+            "top":            top,
             "motion":         motion,
             "buffer_pct":     int(len(self.buffer) / self.seq_len * 100),
             "confirm_word":   self.confirm_word,

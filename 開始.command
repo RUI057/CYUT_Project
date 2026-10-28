@@ -1,6 +1,7 @@
 #!/bin/bash
 # Mac 專用：雙擊這個檔案就會開啟操作選單（收集資料 / 訓練模型 / 測試辨識）。
 # 若雙擊沒反應，先在終端機執行一次：chmod +x "開始.command"
+# 參數會原樣傳給 start.py（翻譯.command 用 --web 直接開翻譯網頁）。
 
 cd "$(dirname "$0")" || exit 1
 
@@ -49,4 +50,4 @@ if [ -z "$PY" ]; then
 fi
 
 echo "版本：$("$PY" --version 2>&1)"
-"$PY" start.py
+"$PY" start.py "$@"

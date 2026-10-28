@@ -6,14 +6,13 @@
 
 使用方式：
   - 組長（Mac，收集＋訓練）：主專案雙擊「開始.command」
+  - 直接開翻譯網頁（Mac）：雙擊「翻譯.command」（= python start.py --web，不經過選單）
   - 組員（Windows，只收集）：收集包雙擊「開始.bat」
   - 或終端機執行： python start.py
 """
 import os
 import re
 import subprocess
-import threading
-import webbrowser
 import sys
 from collections import Counter
 from pathlib import Path
@@ -305,8 +304,11 @@ def do_test():
     subprocess.call([sys.executable, "test_model.py"])
 
 
-def do_web(port=8000):
-    """開啟翻譯網頁（FastAPI + MJPEG）。伺服器會一直跑，按 Ctrl+C 回到選單。"""
+def do_web(port=8000, confirm=True):
+    """開啟翻譯網頁（FastAPI + MJPEG）。伺服器會一直跑，按 Ctrl+C 回到選單。
+
+    confirm=False：一鍵啟動（翻譯.command）用，不問「準備好了嗎」。
+    """
     if not ensure_packages(PKG_COLLECT + PKG_TRAIN + PKG_WEB, "翻譯網頁"):
         return
     if not (ROOT / "data" / "model.pkl").exists():
@@ -316,13 +318,12 @@ def do_web(port=8000):
     title("即將開啟翻譯網頁")
     print(f"  網址：{url}（等一下會自動用瀏覽器打開）")
     print("  在網頁上按「啟動攝影機」開始辨識，比完一段手語後手離開畫面即自動翻譯。")
-    print("\n  伺服器會持續執行，要回到選單請在這個視窗按 Ctrl+C。")
-    if not ask_yes("\n準備好了嗎？"):
+    print("\n  伺服器會持續執行，要" + ("回到選單" if confirm else "關閉") + "請在這個視窗按 Ctrl+C。")
+    if confirm and not ask_yes("\n準備好了嗎？"):
         return
-    # 伺服器要先起來才連得上；開瀏覽器的動作丟到背景延遲執行
-    threading.Timer(2.0, lambda: webbrowser.open(url)).start()
+    # --open：伺服器真的就緒才開瀏覽器；連接埠被佔用或已經在跑時 web.py 自己會處理
     try:
-        subprocess.call([sys.executable, "web.py", "--port", str(port)])
+        subprocess.call([sys.executable, "web.py", "--port", str(port), "--open"])
     except KeyboardInterrupt:
         pass
     print("\n網頁伺服器已關閉。")
@@ -409,6 +410,13 @@ else:
 
 
 def main():
+    if "--web" in sys.argv[1:] and not KIT:      # 翻譯.command：直接開翻譯網頁
+        try:
+            do_web(confirm=False)
+        except KeyboardInterrupt:
+            print("\n網頁伺服器已關閉。")
+        pause()
+        return
     v = sys.version_info
     if v < (3, 9):
         print(f"❌ Python 版本太舊（{v.major}.{v.minor}），需要 3.9～3.12。")

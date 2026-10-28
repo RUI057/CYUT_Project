@@ -13,3 +13,7 @@ __pycache__/
 # macOS Finder 自動產生的檔案、資料健檢報告（check_dataset.py 每次重新產生）
 .DS_Store
 data/quality_report.txt
+
+# 網頁的個人設定（web.py 自動產生）、組員傳來還沒合併的資料
+data/web_settings.json
+收集資料/
